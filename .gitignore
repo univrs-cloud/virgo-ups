@@ -1,0 +1,9 @@
+debhelper-build-stamp
+.debhelper
+*.deb
+*.dsc
+*.buildinfo
+*.changes
+*.substvars
+*.debhelper
+debian/virgo-ups
