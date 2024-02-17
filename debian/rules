@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_usrlocal:
+
+override_dh_auto_install:
+	install -D -m 0755 bin/ups.sh $$(pwd)/debian/virgo-ups/usr/sbin/ups.sh
+	install -D -m 0644 systemd/ups.service $$(pwd)/debian/virgo-ups/lib/systemd/system/ups.service
+	install -D -m 0755 systemd/ups.shutdown $$(pwd)/debian/virgo-ups/lib/systemd/system-shutdown/ups.shutdown
+
+	install -D -d $$(pwd)/debian/virgo-ups/usr/share/virgo/
+	find virgo -name "*.py" -exec install -D -m 0644 {} debian/virgo-ups/usr/share/virgo/{} \;
+
+configure:
+
+clean:
+	dh_clean

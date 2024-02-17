@@ -1,0 +1,13 @@
+Source: virgo-ups
+Priority: extra
+Maintainer: Mihai Balint <balint.mihai@gmail.com>
+Build-Depends: debhelper (>= 10.2.5)
+Standards-Version: 4.5.0
+Section: utils
+
+Package: virgo-ups
+Priority: extra
+Architecture: all
+Depends: ${misc:Depends}, python3-smbus, python3-pip
+Description: UPS monitoring and automatic power-off services package
+ Ensures that UPS monitoring and automatic power-off service is installed and running

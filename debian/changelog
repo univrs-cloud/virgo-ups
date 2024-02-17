@@ -1,0 +1,5 @@
+virgo-ups (0.0.1) unstable; urgency=medium
+
+  * Initial release. Systemd service scripts.
+
+ -- mihai <balint.mihai@gmail.com>  Sat, 17 Feb 2023 07:42:09 +0000
