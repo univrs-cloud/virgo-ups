@@ -1,3 +1,4 @@
+dist
 debhelper-build-stamp
 .debhelper
 *.deb
@@ -7,4 +8,3 @@ debhelper-build-stamp
 *.substvars
 *.debhelper
 debian/virgo-ups
-deb-packages
