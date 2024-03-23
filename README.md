@@ -7,7 +7,7 @@ How to build DEB
 
 How to install DEB
 ---
-`dpkg -i virgo-ups_1.0.0_all.deb`
+`apt install -y ./virgo-ups_1.0.0_all.deb`
 
 
 How to start service
