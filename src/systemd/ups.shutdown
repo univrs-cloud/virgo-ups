@@ -1,10 +1,12 @@
 #!/bin/sh
 
+# cat /sys/kernel/debug/gpio
+
 if [ $1 = "poweroff" ] || [ $1 = "halt" ]; then
     BUTTON=0
 
     if grep -aq "Pi 4" /proc/device-tree/model; then
-        BUTTON=26 # (button 26)
+        BUTTON=538 # 512 + 26 (button 26)
     fi
 
     if grep -aq "Pi 5" /proc/device-tree/model; then
