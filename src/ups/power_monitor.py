@@ -1,10 +1,12 @@
-import logging, time, struct, subprocess
+import logging
+import struct
+import subprocess
+import time
 import smbus
 
 from datetime import datetime
-from threading import Thread, Lock
+from threading import Thread
 
-from .input_button import ConsistentButton
 from .settings import is_development
 
 GRID_POWER = "grid"
@@ -101,6 +103,14 @@ class SystemPower:
 
     def status(self):
         return f"Battery: {self.capacity:2}% ({self.voltage:4.2f}V), primary power: {self.primary_power_source}"
+
+    def status_dict(self) -> dict:
+        return {
+            "capacity": self.capacity,
+            "voltage": self.voltage,
+            "primary_power_source": self.primary_power_source,
+            "low_capacity_threshold": self.low_capacity_threshold,
+        }
 
     def has_critical_battery_power(self):
         return self.is_running_from_battery and (self.capacity <= self.low_capacity_threshold)

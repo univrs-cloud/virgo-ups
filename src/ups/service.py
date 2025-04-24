@@ -9,6 +9,8 @@ from logging.config import dictConfig
 from logging.handlers import SysLogHandler
 from threading import Thread, Lock
 
+from .unix_socket_api import UnixSocketApi
+
 from .input_button import BlinkingButton
 from .power_monitor import SystemPower
 from .settings import is_development
@@ -46,7 +48,9 @@ def logging_setup():
 def main():
     logging.info("Starting ups power management")
     ups = SystemPower(BlinkingButton(Button(6)))
+    sock_handler = UnixSocketApi(ups)
     try:
+        sock_handler.start()
         if is_development():
             ups.log_forever(interval=1.5)
         else:
@@ -55,6 +59,7 @@ def main():
         print("\n[Ctrl-C] received, exiting...")
     finally:
         logging.info("Exiting")
+        sock_handler.stop()
         ups.stop()
 
 

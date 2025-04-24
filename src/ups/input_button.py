@@ -40,7 +40,7 @@ Test 2
 
 class ConsistentButton(Thread):
     def __init__(self, button: "gpiozero.Button"):
-        super().__init__()
+        super().__init__(daemon=True)
         self.button = button
         self.button.when_pressed = self._button_pressed
         self.button.when_released = self._button_released
@@ -75,7 +75,7 @@ class ConsistentButton(Thread):
 
     def stop(self):
         self.running = False
-        self.join()
+        self.join(timeout=5.0)
 
     def _cycle(self, current_state):
         with self._state_lock:
