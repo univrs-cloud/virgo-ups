@@ -19,6 +19,7 @@ class SystemPower:
 
         self.voltage = None
         self.capacity = None
+        self.capacity_float = None
         self.primary_power_source = None
         self.is_running_from_battery = None
         self.has_read_errors = False
@@ -47,7 +48,8 @@ class SystemPower:
         address = 0x36
         read = self.bus.read_word_data(address, 4)
         swapped = struct.unpack("<H", struct.pack(">H", read))[0]
-        self.capacity = int(swapped / 256)
+        self.capacity_float = swapped / 256
+        self.capacity = int(self.capacity_float)
         return self.capacity
 
     def _read_primary_power_source(self):
@@ -107,7 +109,7 @@ class SystemPower:
         if refresh:
             self._read_power_values()
         return {
-            "capacity": self.capacity,
+            "capacity": self.capacity_float,
             "voltage": self.voltage,
             "primary_power_source": self.primary_power_source,
             "low_capacity_threshold": self.low_capacity_threshold,
