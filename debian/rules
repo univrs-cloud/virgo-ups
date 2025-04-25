@@ -9,12 +9,9 @@ override_dh_auto_install:
 	install -v -D -m 0755 src/systemd/ups.shutdown $$(pwd)/debian/virgo-ups/lib/systemd/system-shutdown/ups.shutdown
 	install -v -D -m 0644 src/systemd/virgo-ups.service $$(pwd)/debian/virgo-ups/lib/systemd/system/virgo-ups.service
 	install -v -D -m 0755 src/bin/ups.sh $$(pwd)/debian/virgo-ups/usr/sbin/ups.sh
-
-	install -v -D -m 0644 src/ups/__init__.py $$(pwd)/debian/virgo-ups/usr/share/virgo/ups/__init__.py
-	install -v -D -m 0644 src/ups/input_button.py $$(pwd)/debian/virgo-ups/usr/share/virgo/ups/input_button.py
-	install -v -D -m 0644 src/ups/power_monitor.py $$(pwd)/debian/virgo-ups/usr/share/virgo/ups/power_monitor.py
-	install -v -D -m 0644 src/ups/service.py $$(pwd)/debian/virgo-ups/usr/share/virgo/ups/service.py
-	install -v -D -m 0644 src/ups/settings.py $$(pwd)/debian/virgo-ups/usr/share/virgo/ups/settings.py
+	
+	install -v -d $$(pwd)/debian/virgo-ups/usr/share/virgo
+	cp -r src/ups $$(pwd)/debian/virgo-ups/usr/share/virgo/
 
 configure:
 
