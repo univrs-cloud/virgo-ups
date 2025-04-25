@@ -1,11 +1,10 @@
-from ups.power_monitor import SystemPower
-
-
 import json
 import logging
 import os
 import socket
 from threading import Thread
+
+from .power_monitor import SystemPower
 
 
 UNIX_SOCKET_PATH = "/var/run/virgo-ups.sock"

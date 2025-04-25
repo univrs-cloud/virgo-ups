@@ -85,8 +85,7 @@ class SystemPower:
                 raise
             except Exception as e:
                 has_errors = True
-                msg = str(e) or type(e).__name__
-                logging.warning(f"Failed to read {label}: {msg}")
+                logging.warning(f"Failed to read {label}: {repr(e)}")
         self.has_read_errors = has_errors
 
     def set_primary_power_source(self, primary_power_source, log_change=False):
@@ -104,7 +103,9 @@ class SystemPower:
     def status(self):
         return f"Battery: {self.capacity:2}% ({self.voltage:4.2f}V), primary power: {self.primary_power_source}"
 
-    def status_dict(self) -> dict:
+    def status_dict(self, refresh: bool = True) -> dict:
+        if refresh:
+            self._read_power_values()
         return {
             "capacity": self.capacity,
             "voltage": self.voltage,
@@ -135,8 +136,7 @@ class SystemPower:
         except Exception as e:
             self.has_issued_shutdown = False
             self.issued_shutdown_timestamp = None
-            msg = str(e) or type(e).__name__
-            logging.warning(f"Failed to issue shutdown command: {msg}")
+            logging.warning(f"Failed to issue shutdown command: {repr(e)}")
 
     def stop(self):
         self.running = False
