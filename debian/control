@@ -7,7 +7,7 @@ Section: utils
 
 Package: virgo-ups
 Priority: extra
-Architecture: all
+Architecture: arm64
 Depends: ${misc:Depends}, python3-smbus, python3-pip
 Description: UPS monitoring and automatic power-off services package
  Ensures that UPS monitoring and automatic power-off service is installed and running
