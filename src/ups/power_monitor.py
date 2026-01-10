@@ -9,19 +9,40 @@ from threading import Thread
 
 from .settings import is_development
 
+# Power source constants
 GRID_POWER = "grid"
 BATTERY_POWER = "battery"
 
+# I2C bus constants
+I2C_BUS_PORT = 1  # 0 = /dev/i2c-0 (port I2C0), 1 = /dev/i2c-1 (port I2C1)
+I2C_BATTERY_ADDRESS = 0x36  # Battery fuel gauge I2C address
+
+# Register addresses for battery readings
+REGISTER_VOLTAGE = 2  # Voltage register
+REGISTER_CAPACITY = 4  # Capacity register
+
+# Calculation constants
+VOLTAGE_SCALE_FACTOR = 1.25 / 1000 / 16  # Voltage calculation scaling
+CAPACITY_SCALE_FACTOR = 256  # Capacity calculation scaling (from 256 steps to percentage)
+
 
 class SystemPower:
+    """Monitors system power status from UPS battery via I2C and button input."""
+
     def __init__(self, button):
-        self.bus = smbus.SMBus(1)  # 0 = /dev/i2c-0 (port I2C0), 1 = /dev/i2c-1 (port I2C1)
+        """Initialize power monitor with button input for power source detection.
+        
+        Args:
+            button: Button instance that detects power source state (pressed = grid, released = battery)
+        """
+        self.bus = smbus.SMBus(I2C_BUS_PORT)
 
         self.voltage = None
         self.capacity = None
         self.capacity_float = None
-        self.primary_power_source = None
+        self.power_source = None
         self.is_running_from_battery = None
+        self.is_charging = False
         self.has_read_errors = False
         self.running = False
         self.low_capacity_threshold = 50
@@ -38,44 +59,64 @@ class SystemPower:
         self.power_source_button.start()
 
     def _read_voltage(self):
-        address = 0x36
-        read = self.bus.read_word_data(address, 2)
+        """Read battery voltage from I2C device.
+        
+        Returns:
+            float: Battery voltage in volts
+        """
+        read = self.bus.read_word_data(I2C_BATTERY_ADDRESS, REGISTER_VOLTAGE)
         swapped = struct.unpack("<H", struct.pack(">H", read))[0]
-        self.voltage = swapped * 1.25 / 1000 / 16
+        self.voltage = swapped * VOLTAGE_SCALE_FACTOR
         return self.voltage
 
     def _read_capacity(self):
-        address = 0x36
-        read = self.bus.read_word_data(address, 4)
+        """Read battery capacity from I2C device.
+        
+        Returns:
+            int: Battery capacity as percentage (0-100)
+        """
+        read = self.bus.read_word_data(I2C_BATTERY_ADDRESS, REGISTER_CAPACITY)
         swapped = struct.unpack("<H", struct.pack(">H", read))[0]
-        self.capacity_float = swapped / 256
+        self.capacity_float = swapped / CAPACITY_SCALE_FACTOR
         self.capacity = int(self.capacity_float)
         return self.capacity
 
-    def _read_primary_power_source(self):
-        primary_power_source = GRID_POWER if self.power_source_button.is_pressed else BATTERY_POWER
-        self.set_primary_power_source(primary_power_source, log_change=True)
+    def _read_power_source(self):
+        """Read power source from button state."""
+        power_source = GRID_POWER if self.power_source_button.is_pressed else BATTERY_POWER
+        # If switching to battery, charging is definitely False
+        if power_source == BATTERY_POWER:
+            self.is_charging = False
+        self.set_power_source(power_source, log_change=True)
 
     def _beeing_held(self):
+        """Callback for when button is held (currently unused)."""
         pass
 
     def _running_from_grid_charging(self):
-        self.set_primary_power_source(GRID_POWER, log_change=True)
+        """Callback for when power source is grid with charging (blinking detected)."""
+        self.is_charging = True
+        self.set_power_source(GRID_POWER, log_change=True)
 
     def _running_from_grid(self):
-        self.set_primary_power_source(GRID_POWER, log_change=True)
+        """Callback for when power source switches to grid."""
+        self.is_charging = False
+        self.set_power_source(GRID_POWER, log_change=True)
 
     def _running_from_battery(self):
+        """Callback for when power source switches to battery."""
+        self.is_charging = False
         self._read_power_values()
-        self.set_primary_power_source(BATTERY_POWER, log_change=True)
+        self.set_power_source(BATTERY_POWER, log_change=True)
         if self.running and self.has_critical_battery_power():
             self.shutdown()
 
     def _read_power_values(self):
+        """Read all power-related values from I2C and button."""
         readers = [
             {"name": "voltage", "func": self._read_voltage},
             {"name": "capacity", "func": self._read_capacity},
-            {"name": "primary power source", "func": self._read_primary_power_source},
+            {"name": "power source", "func": self._read_power_source},
         ]
         has_errors = False
         for reader in readers:
@@ -90,35 +131,57 @@ class SystemPower:
                 logging.warning(f"Failed to read {label}: {repr(e)}")
         self.has_read_errors = has_errors
 
-    def set_primary_power_source(self, primary_power_source, log_change=False):
-        if self.primary_power_source and self.primary_power_source != primary_power_source:
-            f = open("/tmp/ups_power_source", "w")
-            f.write(str(primary_power_source))
-            f.close()
+    def set_power_source(self, power_source, log_change=False):
+        """Set the power source and update internal state.
+        
+        Args:
+            power_source: Power source constant (GRID_POWER or BATTERY_POWER)
+            log_change: If True, log when power source changes
+        """
+        if log_change and self.power_source and self.power_source != power_source:
+            logging.info(f"Power source switched from {self.power_source} to {power_source}")
 
-        if log_change and self.primary_power_source and self.primary_power_source != primary_power_source:
-            logging.info(f"Primary power source switched from {self.primary_power_source} to {primary_power_source}")
-
-        self.primary_power_source = primary_power_source
-        self.is_running_from_battery = self.primary_power_source == BATTERY_POWER
+        self.power_source = power_source
+        self.is_running_from_battery = self.power_source == BATTERY_POWER
 
     def status(self):
-        return f"Battery: {self.capacity:2}% ({self.voltage:4.2f}V), primary power: {self.primary_power_source}"
+        """Get human-readable status string.
+        
+        Returns:
+            str: Formatted status message
+        """
+        charging_status = " (charging)" if self.is_charging else ""
+        return f"Battery: {self.capacity:2}% ({self.voltage:4.2f}V), power: {self.power_source}{charging_status}"
 
     def status_dict(self, refresh: bool = True) -> dict:
+        """Get status as dictionary.
+        
+        Args:
+            refresh: If True, refresh values from hardware before returning
+            
+        Returns:
+            dict: Status information including capacity, voltage, and power source
+        """
         if refresh:
             self._read_power_values()
         return {
             "capacity": self.capacity_float,
             "voltage": self.voltage,
-            "primary_power_source": self.primary_power_source,
+            "power_source": self.power_source,
+            "is_charging": self.is_charging,
             "low_capacity_threshold": self.low_capacity_threshold,
         }
 
     def has_critical_battery_power(self):
+        """Check if battery power is critically low.
+        
+        Returns:
+            bool: True if running on battery and capacity is at or below threshold
+        """
         return self.is_running_from_battery and (self.capacity <= self.low_capacity_threshold)
 
     def shutdown(self):
+        """Initiate system shutdown due to low battery."""
         if self.has_issued_shutdown:
             return
         try:
@@ -141,14 +204,21 @@ class SystemPower:
             logging.warning(f"Failed to issue shutdown command: {repr(e)}")
 
     def stop(self):
+        """Stop monitoring and clean up resources."""
         self.running = False
         if isinstance(self.power_source_button, Thread):
             self.power_source_button.stop()
 
     def monitor_forever(self, max_interval=60):
-        f = open("/tmp/ups_power_source", "w")
-        f.write(str(self.primary_power_source))
-        f.close()
+        """Monitor power status continuously with adaptive polling interval.
+        
+        Polling interval adapts based on power source and battery level:
+        - More frequent when on battery or low capacity
+        - Less frequent when on grid power with good capacity
+        
+        Args:
+            max_interval: Maximum polling interval in seconds (default: 60)
+        """
         now = datetime.utcnow()
         self.running = True
         while self.running:
@@ -169,6 +239,11 @@ class SystemPower:
             time.sleep(interval)
 
     def log_forever(self, interval=5):
+        """Log power status continuously at fixed interval (for development).
+        
+        Args:
+            interval: Polling interval in seconds (default: 5)
+        """
         now = datetime.utcnow()
         self.running = True
         while self.running:
@@ -179,6 +254,21 @@ class SystemPower:
 
 
 def scaled_value(inp_value, inp_min, inp_max, out_min, out_max):
+    """Scale a value from one range to another using linear interpolation.
+    
+    Args:
+        inp_value: Input value to scale
+        inp_min: Minimum of input range
+        inp_max: Maximum of input range
+        out_min: Minimum of output range
+        out_max: Maximum of output range
+        
+    Returns:
+        float: Scaled value in output range
+        
+    Raises:
+        ValueError: If input or output ranges are invalid
+    """
     if inp_min >= inp_max:
         raise ValueError(f"invalid input interval: {inp_min}, {inp_max}")
     if out_min >= out_max:

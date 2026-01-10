@@ -6,19 +6,36 @@ from threading import Thread
 
 from .power_monitor import SystemPower
 
-
+# Unix domain socket path for status API
 UNIX_SOCKET_PATH = "/var/run/virgo-ups.sock"
+
+# Socket permissions (readable/writable by all users)
+SOCKET_MODE = 0o666
+
+# Socket accept timeout (seconds)
+SOCKET_TIMEOUT = 1.0
 
 
 class UnixSocketApi:
+    """Unix domain socket API for querying UPS status.
+    
+    Provides a simple API endpoint that returns JSON status information
+    when clients connect to the socket.
+    """
+
     def __init__(self, monitor: SystemPower):
+        """Initialize Unix socket API.
+        
+        Args:
+            monitor: SystemPower instance to query for status
+        """
         self._monitor = monitor
         self._running = False
         self._thread = None
         self._socket = None
 
     def start(self):
-        """Start the unix socket handler in a background thread"""
+        """Start the Unix socket handler in a background thread."""
         if self._thread is not None:
             return
 
@@ -27,27 +44,36 @@ class UnixSocketApi:
         self._thread.start()
 
     def stop(self):
-        """Stop the unix socket handler thread"""
+        """Stop the Unix socket handler thread and clean up resources."""
         self._running = False
         if self._socket:
-            self._socket.close()
+            try:
+                self._socket.close()
+            except Exception as e:
+                logging.warning(f"Error closing socket: {e}")
         if self._thread:
             self._thread.join(timeout=5.0)
             self._thread = None
 
     def _run(self):
-        """Main socket handling loop running in background thread"""
+        """Main socket handling loop running in background thread."""
         try:
             # Remove existing socket file if it exists
             if os.path.exists(UNIX_SOCKET_PATH):
-                os.unlink(UNIX_SOCKET_PATH)
+                try:
+                    os.unlink(UNIX_SOCKET_PATH)
+                except Exception as e:
+                    logging.warning(f"Error removing existing socket file: {e}")
 
-            # Create and bind unix domain socket
+            # Create and bind Unix domain socket
             self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self._socket.bind(UNIX_SOCKET_PATH)
-            os.chmod(UNIX_SOCKET_PATH, 0o666)
+            try:
+                os.chmod(UNIX_SOCKET_PATH, SOCKET_MODE)
+            except Exception as e:
+                logging.warning(f"Error setting socket permissions: {e}")
             self._socket.listen(1)
-            self._socket.settimeout(1.0)
+            self._socket.settimeout(SOCKET_TIMEOUT)
 
             while self._running:
                 try:
@@ -57,18 +83,31 @@ class UnixSocketApi:
                         data = self._monitor.status_dict()
                         data_bytes = f"{json.dumps(data)}\n".encode()
                         conn.sendall(data_bytes)
+                    except Exception as e:
+                        logging.error(f"Error sending status to client: {e}")
                     finally:
-                        conn.close()
+                        try:
+                            conn.close()
+                        except Exception as e:
+                            logging.warning(f"Error closing client connection: {e}")
                 except socket.timeout:
                     continue
                 except Exception as e:
-                    logging.error(f"Error handling socket connection: {e}")
+                    if self._running:  # Only log if we're still supposed to be running
+                        logging.error(f"Error handling socket connection: {e}")
                     continue
 
         except Exception as e:
             logging.error(f"Unix socket handler error: {e}")
         finally:
+            # Clean up socket and socket file
             if self._socket:
-                self._socket.close()
+                try:
+                    self._socket.close()
+                except Exception as e:
+                    logging.warning(f"Error closing socket in cleanup: {e}")
             if os.path.exists(UNIX_SOCKET_PATH):
-                os.unlink(UNIX_SOCKET_PATH)
+                try:
+                    os.unlink(UNIX_SOCKET_PATH)
+                except Exception as e:
+                    logging.warning(f"Error removing socket file in cleanup: {e}")
