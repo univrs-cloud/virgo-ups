@@ -55,8 +55,40 @@ class SystemPower:
         self.power_source_button.when_released = self._running_from_battery
         self.power_source_button.when_held = self._beeing_held
 
+        # Socket API reference for broadcasting changes
+        self._socket_api = None
+
+        # Track previous values to detect changes
+        self._previous_capacity = None
+        self._previous_voltage = None
+
         self._read_power_values()
         self.power_source_button.start()
+
+    def set_socket_api(self, socket_api):
+        """Set the socket API instance for broadcasting status changes.
+        
+        Args:
+            socket_api: UnixSocketApi instance
+        """
+        self._socket_api = socket_api
+
+    def _broadcast_if_changed(self, force=False):
+        """Broadcast status if values have changed.
+        
+        Args:
+            force: If True, broadcast even if no changes detected
+        """
+        if self._socket_api is None:
+            return
+
+        capacity_changed = self._previous_capacity is None or self.capacity != self._previous_capacity
+        voltage_changed = self._previous_voltage is None or abs(self.voltage - self._previous_voltage) > 0.01  # 0.01V threshold
+
+        if force or capacity_changed or voltage_changed:
+            self._socket_api.broadcast_status()
+            self._previous_capacity = self.capacity
+            self._previous_voltage = self.voltage
 
     def _read_voltage(self):
         """Read battery voltage from I2C device.
@@ -95,19 +127,31 @@ class SystemPower:
 
     def _running_from_grid_charging(self):
         """Callback for when power source is grid with charging (blinking detected)."""
+        old_charging = self.is_charging
         self.is_charging = True
         self.set_power_source(GRID_POWER, log_change=True)
+        # Broadcast if charging state changed
+        if old_charging != self.is_charging and self._socket_api:
+            self._socket_api.broadcast_status()
 
     def _running_from_grid(self):
         """Callback for when power source switches to grid."""
+        old_charging = self.is_charging
         self.is_charging = False
         self.set_power_source(GRID_POWER, log_change=True)
+        # Broadcast if charging state changed
+        if old_charging != self.is_charging and self._socket_api:
+            self._socket_api.broadcast_status()
 
     def _running_from_battery(self):
         """Callback for when power source switches to battery."""
+        old_charging = self.is_charging
         self.is_charging = False
         self._read_power_values()
         self.set_power_source(BATTERY_POWER, log_change=True)
+        # Broadcast charging state change
+        if old_charging != self.is_charging and self._socket_api:
+            self._socket_api.broadcast_status()
         if self.running and self.has_critical_battery_power():
             self.shutdown()
 
@@ -138,11 +182,16 @@ class SystemPower:
             power_source: Power source constant (GRID_POWER or BATTERY_POWER)
             log_change: If True, log when power source changes
         """
+        old_power_source = self.power_source
         if log_change and self.power_source and self.power_source != power_source:
             logging.info(f"Power source switched from {self.power_source} to {power_source}")
 
         self.power_source = power_source
         self.is_running_from_battery = self.power_source == BATTERY_POWER
+        
+        # Broadcast if power source changed
+        if old_power_source and old_power_source != power_source and self._socket_api:
+            self._socket_api.broadcast_status()
 
     def status(self):
         """Get human-readable status string.
@@ -224,6 +273,9 @@ class SystemPower:
         while self.running:
             uptime = datetime.utcnow() - now
             self._read_power_values()
+            # Broadcast if capacity or voltage changed
+            self._broadcast_if_changed()
+            
             min_interval = 1 if self.is_running_from_battery else max(10, max_interval / 2.0)
             interval = scaled_value(
                 self.capacity, self.low_capacity_threshold, self.low_capacity_threshold + 15, min_interval, max_interval
@@ -249,6 +301,8 @@ class SystemPower:
         while self.running:
             uptime = datetime.utcnow() - now
             self._read_power_values()
+            # Broadcast if capacity or voltage changed
+            self._broadcast_if_changed()
             logging.info(f"[{uptime.total_seconds():4.0f}] {self.status()}")
             time.sleep(interval)
 

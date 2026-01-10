@@ -77,6 +77,8 @@ def main():
     logging.info("Starting ups power management")
     ups = SystemPower(BlinkingButton(Button(POWER_SOURCE_BUTTON_PIN)))
     sock_handler = UnixSocketApi(ups)
+    # Link socket API to power monitor for broadcasting changes
+    ups.set_socket_api(sock_handler)
     try:
         sock_handler.start()
         if is_development():
