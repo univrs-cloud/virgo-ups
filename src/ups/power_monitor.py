@@ -61,6 +61,7 @@ class SystemPower:
         # Track previous values to detect changes
         self._previous_capacity = None
         self._previous_voltage = None
+        self._previous_is_charging = None
 
         self._read_power_values()
         self.power_source_button.start()
@@ -73,6 +74,17 @@ class SystemPower:
         """
         self._socket_api = socket_api
 
+    def _update_previous_values(self):
+        """Update previous capacity, voltage, and charging state to current values.
+        
+        This should be called after broadcasting status to ensure future changes
+        are detected correctly, especially after direct broadcasts from plug/unplug
+        events that refresh values via status_dict().
+        """
+        self._previous_capacity = self.capacity
+        self._previous_voltage = self.voltage
+        self._previous_is_charging = self.is_charging
+
     def _broadcast_if_changed(self, force=False):
         """Broadcast status if values have changed.
         
@@ -84,11 +96,12 @@ class SystemPower:
 
         capacity_changed = self._previous_capacity is None or self.capacity != self._previous_capacity
         voltage_changed = self._previous_voltage is None or abs(self.voltage - self._previous_voltage) > 0.01  # 0.01V threshold
+        charging_changed = self._previous_is_charging is None or self.is_charging != self._previous_is_charging
 
-        if force or capacity_changed or voltage_changed:
+        if force or capacity_changed or voltage_changed or charging_changed:
             self._socket_api.broadcast_status()
-            self._previous_capacity = self.capacity
-            self._previous_voltage = self.voltage
+            # Update previous values after broadcasting to track current state
+            self._update_previous_values()
 
     def _read_voltage(self):
         """Read battery voltage from I2C device.
@@ -133,6 +146,8 @@ class SystemPower:
         # Broadcast if charging state changed
         if old_charging != self.is_charging and self._socket_api:
             self._socket_api.broadcast_status()
+            # Update previous values after broadcast since status_dict() refreshes them
+            self._update_previous_values()
 
     def _running_from_grid(self):
         """Callback for when power source switches to grid."""
@@ -142,6 +157,8 @@ class SystemPower:
         # Broadcast if charging state changed
         if old_charging != self.is_charging and self._socket_api:
             self._socket_api.broadcast_status()
+            # Update previous values after broadcast since status_dict() refreshes them
+            self._update_previous_values()
 
     def _running_from_battery(self):
         """Callback for when power source switches to battery."""
@@ -152,6 +169,8 @@ class SystemPower:
         # Broadcast charging state change
         if old_charging != self.is_charging and self._socket_api:
             self._socket_api.broadcast_status()
+            # Update previous values after broadcast since status_dict() refreshes them
+            self._update_previous_values()
         if self.running and self.has_critical_battery_power():
             self.shutdown()
 
@@ -192,6 +211,8 @@ class SystemPower:
         # Broadcast if power source changed
         if old_power_source and old_power_source != power_source and self._socket_api:
             self._socket_api.broadcast_status()
+            # Update previous values after broadcast since status_dict() refreshes them
+            self._update_previous_values()
 
     def status(self):
         """Get human-readable status string.
