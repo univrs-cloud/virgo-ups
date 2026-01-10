@@ -1,4 +1,4 @@
-virgo-ups (2.0.0) UNRELEASED; urgency=medium
+virgo-ups (2.0.0) stable; urgency=medium
   * Socket provice is_charging
  -- Robert <robert.gurde@gmail.com>  Sat, 10 Jan 2026 12:36:58 +0000
 
