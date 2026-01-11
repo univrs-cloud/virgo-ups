@@ -5,7 +5,7 @@ import time
 import smbus
 
 from datetime import datetime
-from threading import Thread
+from threading import Thread, Lock
 
 from .settings import is_development
 
@@ -63,6 +63,14 @@ class SystemPower:
         self._previous_voltage = None
         self._previous_is_charging = None
 
+        # Charging detection parameters
+        self._charging_detection_samples = 3
+        self._charging_detection_interval = 5  # seconds
+        self._last_charging_check_time = None
+        self._charging_check_interval = 20  # Check charging every 20 seconds when on grid
+        self._charging_detection_in_progress = False
+        self._charging_detection_lock = Lock()
+
         self._read_power_values()
         self.power_source_button.start()
 
@@ -114,6 +122,84 @@ class SystemPower:
         self.voltage = swapped * VOLTAGE_SCALE_FACTOR
         return self.voltage
 
+    def _detect_charging(self, samples=3, interval=5):
+        """Detect if battery is charging based on capacity trend.
+        
+        Takes multiple capacity readings at fixed intervals to detect if capacity
+        is increasing (charging) or stable/decreasing (not charging).
+        
+        Args:
+            samples: Number of capacity samples to take (default: 3)
+            interval: Time interval between samples in seconds (default: 5)
+            
+        Returns:
+            bool: True if charging (capacity increasing), False otherwise
+        """
+        readings = []
+        for _ in range(samples):
+            self._read_capacity()  # Update capacity_float
+            readings.append(self.capacity_float)  # Use float for precision
+            if _ < samples - 1:  # Don't sleep after last sample
+                time.sleep(interval)
+        
+        if len(readings) < samples:
+            return None
+        
+        delta = readings[-1] - readings[0]
+        # If capacity increased by at least 0.1%, consider it charging
+        return delta > 0.1
+
+    def _check_charging_status_background(self):
+        """Background thread to detect charging status (blocks for detection period)."""
+        try:
+            # Detect charging based on voltage trend (this will block for samples * interval seconds)
+            charging_state = self._detect_charging(
+                samples=self._charging_detection_samples,
+                interval=self._charging_detection_interval
+            )
+            if charging_state is not None:
+                with self._charging_detection_lock:
+                    old_charging = self.is_charging
+                    if old_charging != charging_state:
+                        self.is_charging = charging_state
+                        self._last_charging_check_time = datetime.utcnow()
+                
+                # Broadcast if charging state changed
+                if old_charging != charging_state and self._socket_api:
+                    if charging_state:
+                        logging.info(f"Charging detected (capacity increasing)")
+                    else:
+                        logging.info(f"Charging stopped (capacity stable/decreasing)")
+                    # Broadcast full status (voltage, capacity, power_source, is_charging)
+                    self._socket_api.broadcast_status()
+                    self._update_previous_values()
+        except Exception as e:
+            logging.warning(f"Error in charging detection: {e}")
+        finally:
+            with self._charging_detection_lock:
+                self._charging_detection_in_progress = False
+
+    def _check_charging_status(self):
+        """Check charging status when on grid power (non-blocking - starts background thread)."""
+        if self.power_source != GRID_POWER:
+            with self._charging_detection_lock:
+                self._charging_detection_in_progress = False
+            return
+        
+        now = datetime.utcnow()
+        should_check = (
+            not self._charging_detection_in_progress and
+            (self._last_charging_check_time is None or
+             (now - self._last_charging_check_time).total_seconds() >= self._charging_check_interval)
+        )
+        if should_check:
+            with self._charging_detection_lock:
+                if not self._charging_detection_in_progress:
+                    self._charging_detection_in_progress = True
+                    # Start background thread to detect charging (non-blocking)
+                    thread = Thread(target=self._check_charging_status_background, daemon=True)
+                    thread.start()
+
     def _read_capacity(self):
         """Read battery capacity from I2C device.
         
@@ -132,6 +218,7 @@ class SystemPower:
         # If switching to battery, charging is definitely False
         if power_source == BATTERY_POWER:
             self.is_charging = False
+            self._last_charging_check_time = None
         self.set_power_source(power_source, log_change=True)
 
     def _beeing_held(self):
@@ -220,7 +307,7 @@ class SystemPower:
         Returns:
             str: Formatted status message
         """
-        charging_status = " (charging)" if self.is_charging else ""
+        charging_status = " (charging)" if self.is_charging else " (not charging)"
         return f"Battery: {self.capacity:2}% ({self.voltage:4.2f}V), power: {self.power_source}{charging_status}"
 
     def status_dict(self, refresh: bool = True) -> dict:
@@ -294,6 +381,8 @@ class SystemPower:
         while self.running:
             uptime = datetime.utcnow() - now
             self._read_power_values()
+            # Check charging status when on grid power (periodically)
+            self._check_charging_status()
             # Broadcast if capacity or voltage changed
             self._broadcast_if_changed()
             
@@ -322,6 +411,8 @@ class SystemPower:
         while self.running:
             uptime = datetime.utcnow() - now
             self._read_power_values()
+            # Check charging status when on grid power (periodically)
+            self._check_charging_status()
             # Broadcast if capacity or voltage changed
             self._broadcast_if_changed()
             logging.info(f"[{uptime.total_seconds():4.0f}] {self.status()}")
