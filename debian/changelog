@@ -1,3 +1,7 @@
+virgo-ups (2.0.2) stable; urgency=medium
+  * Improve charging detection, based on capacity, it is more accurate
+ -- Robert <robert.gurde@gmail.com>  Sun, 11 Jan 2026 15:28:26 +0000
+
 virgo-ups (2.0.1) stable; urgency=medium
   * Broadcast capacity and voltage and is_charging
  -- Robert <robert.gurde@gmail.com>  Sat, 10 Jan 2026 15:36:12 +0000
