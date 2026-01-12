@@ -51,7 +51,6 @@ class SystemPower:
 
         self.power_source_button = button
         self.power_source_button.when_pressed = self._running_from_grid
-        self.power_source_button.when_blinking = self._running_from_grid_charging
         self.power_source_button.when_released = self._running_from_battery
         self.power_source_button.when_held = self._beeing_held
 
@@ -224,17 +223,6 @@ class SystemPower:
     def _beeing_held(self):
         """Callback for when button is held (currently unused)."""
         pass
-
-    def _running_from_grid_charging(self):
-        """Callback for when power source is grid with charging (blinking detected)."""
-        old_charging = self.is_charging
-        self.is_charging = True
-        self.set_power_source(GRID_POWER, log_change=True)
-        # Broadcast if charging state changed
-        if old_charging != self.is_charging and self._socket_api:
-            self._socket_api.broadcast_status()
-            # Update previous values after broadcast since status_dict() refreshes them
-            self._update_previous_values()
 
     def _running_from_grid(self):
         """Callback for when power source switches to grid."""
