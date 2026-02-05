@@ -49,6 +49,9 @@ class SystemPower:
         self.has_issued_shutdown = False
         self.issued_shutdown_timestamp = None
 
+        # Add lock to prevent race conditions during power source transitions
+        self._state_lock = Lock()
+
         self.power_source_button = button
         self.power_source_button.when_pressed = self._running_from_grid
         self.power_source_button.when_released = self._running_from_battery
@@ -69,6 +72,10 @@ class SystemPower:
         self._charging_check_interval = 20  # Check charging every 20 seconds when on grid
         self._charging_detection_in_progress = False
         self._charging_detection_lock = Lock()
+
+        # Shutdown safety parameters
+        self._shutdown_confirmation_required = True  # Require power source confirmation before shutdown
+        self._shutdown_grace_period = 5  # Seconds to wait and re-check before actual shutdown
 
         self._read_power_values()
         self.power_source_button.start()
@@ -180,7 +187,10 @@ class SystemPower:
 
     def _check_charging_status(self):
         """Check charging status when on grid power (non-blocking - starts background thread)."""
-        if self.power_source != GRID_POWER:
+        with self._state_lock:
+            current_power_source = self.power_source
+        
+        if current_power_source != GRID_POWER:
             with self._charging_detection_lock:
                 self._charging_detection_in_progress = False
             return
@@ -216,8 +226,9 @@ class SystemPower:
         power_source = GRID_POWER if self.power_source_button.is_pressed else BATTERY_POWER
         # If switching to battery, charging is definitely False
         if power_source == BATTERY_POWER:
-            self.is_charging = False
-            self._last_charging_check_time = None
+            with self._charging_detection_lock:
+                self.is_charging = False
+                self._last_charging_check_time = None
         self.set_power_source(power_source, log_change=True)
 
     def _beeing_held(self):
@@ -226,28 +237,41 @@ class SystemPower:
 
     def _running_from_grid(self):
         """Callback for when power source switches to grid."""
-        old_charging = self.is_charging
-        self.is_charging = False
-        self.set_power_source(GRID_POWER, log_change=True)
-        # Broadcast if charging state changed
-        if old_charging != self.is_charging and self._socket_api:
-            self._socket_api.broadcast_status()
-            # Update previous values after broadcast since status_dict() refreshes them
-            self._update_previous_values()
+        with self._state_lock:
+            old_charging = self.is_charging
+            self.is_charging = False
+            # Cancel any pending shutdown when switching to grid power
+            if self.has_issued_shutdown:
+                logging.warning("Shutdown cancelled - grid power restored")
+                self.has_issued_shutdown = False
+                self.issued_shutdown_timestamp = None
+            self.set_power_source(GRID_POWER, log_change=True)
+            # Broadcast if charging state changed
+            if old_charging != self.is_charging and self._socket_api:
+                self._socket_api.broadcast_status()
+                # Update previous values after broadcast since status_dict() refreshes them
+                self._update_previous_values()
 
     def _running_from_battery(self):
         """Callback for when power source switches to battery."""
-        old_charging = self.is_charging
-        self.is_charging = False
-        self._read_power_values()
-        self.set_power_source(BATTERY_POWER, log_change=True)
-        # Broadcast charging state change
-        if old_charging != self.is_charging and self._socket_api:
-            self._socket_api.broadcast_status()
-            # Update previous values after broadcast since status_dict() refreshes them
-            self._update_previous_values()
-        if self.running and self.has_critical_battery_power():
-            self.shutdown()
+        with self._state_lock:
+            old_charging = self.is_charging
+            self.is_charging = False
+            self._read_power_values()
+            self.set_power_source(BATTERY_POWER, log_change=True)
+            # Broadcast charging state change
+            if old_charging != self.is_charging and self._socket_api:
+                self._socket_api.broadcast_status()
+                # Update previous values after broadcast since status_dict() refreshes them
+                self._update_previous_values()
+            
+            # Check for critical battery but don't shutdown immediately from callback
+            # Let the main monitoring loop handle it with proper checks
+            if self.running and self.has_critical_battery_power():
+                logging.warning(
+                    f"Critical battery level detected on switch to battery: {self.capacity}% "
+                    f"(threshold: {self.low_capacity_threshold}%)"
+                )
 
     def _read_power_values(self):
         """Read all power-related values from I2C and button."""
@@ -323,22 +347,99 @@ class SystemPower:
         Returns:
             bool: True if running on battery and capacity is at or below threshold
         """
-        return self.is_running_from_battery and (self.capacity <= self.low_capacity_threshold)
+        with self._state_lock:
+            return self.is_running_from_battery and (self.capacity <= self.low_capacity_threshold)
+
+    def _confirm_shutdown_conditions(self):
+        """Verify shutdown conditions with fresh readings and grace period.
+        
+        This prevents race conditions by:
+        1. Re-reading power source state
+        2. Waiting a grace period
+        3. Re-checking all conditions
+        
+        Returns:
+            bool: True if shutdown should proceed, False otherwise
+        """
+        logging.warning(
+            f"Shutdown condition detected (Battery: {self.capacity}%, threshold: {self.low_capacity_threshold}%). "
+            f"Waiting {self._shutdown_grace_period}s to confirm..."
+        )
+        
+        # Wait grace period to allow power state to stabilize
+        time.sleep(self._shutdown_grace_period)
+        
+        # Re-read all values with lock held
+        with self._state_lock:
+            try:
+                # Fresh read of power source
+                self._read_power_source()
+                # Fresh read of capacity
+                self._read_capacity()
+                
+                # Check conditions again
+                still_on_battery = self.is_running_from_battery
+                still_critical = self.capacity <= self.low_capacity_threshold
+                
+                if not still_on_battery:
+                    logging.info(
+                        f"Shutdown cancelled - now on grid power (Battery: {self.capacity}%)"
+                    )
+                    return False
+                
+                if not still_critical:
+                    logging.info(
+                        f"Shutdown cancelled - battery recovered (Battery: {self.capacity}%, "
+                        f"threshold: {self.low_capacity_threshold}%)"
+                    )
+                    return False
+                
+                # All conditions still met
+                logging.critical(
+                    f"Shutdown conditions confirmed after grace period: "
+                    f"Battery: {self.capacity}%, threshold: {self.low_capacity_threshold}%, "
+                    f"power source: {self.power_source}"
+                )
+                return True
+                
+            except Exception as e:
+                logging.error(f"Error during shutdown confirmation: {repr(e)}")
+                # If we can't confirm, err on the side of caution and don't shutdown
+                return False
 
     def shutdown(self):
-        """Initiate system shutdown due to low battery."""
+        """Initiate system shutdown due to low battery with confirmation."""
         if self.has_issued_shutdown:
             return
+        
+        # If confirmation is required, verify conditions before proceeding
+        if self._shutdown_confirmation_required:
+            if not self._confirm_shutdown_conditions():
+                return
+        
         try:
-            logging.critical(
-                f"Issuing shutdown command (Battery: {self.capacity:2}%, threshold: {self.low_capacity_threshold:2}%)"
-            )
-            if is_development():
-                subprocess.check_call(["echo", "shutdown now"], shell=False)
-            else:
-                subprocess.check_call(["shutdown", "-h", "now"], shell=False)
-            self.has_issued_shutdown = True
-            self.issued_shutdown_timestamp = datetime.utcnow()
+            with self._state_lock:
+                # Final check with lock held
+                if not self.is_running_from_battery:
+                    logging.warning(
+                        f"Shutdown aborted at last moment - on grid power (Battery: {self.capacity}%)"
+                    )
+                    return
+                
+                logging.critical(
+                    f"Issuing shutdown command (Battery: {self.capacity:2}%, "
+                    f"threshold: {self.low_capacity_threshold:2}%, "
+                    f"power source: {self.power_source})"
+                )
+                
+                if is_development():
+                    subprocess.check_call(["echo", "shutdown now"], shell=False)
+                else:
+                    subprocess.check_call(["shutdown", "-h", "now"], shell=False)
+                
+                self.has_issued_shutdown = True
+                self.issued_shutdown_timestamp = datetime.utcnow()
+                
         except KeyboardInterrupt:
             self.has_issued_shutdown = False
             self.issued_shutdown_timestamp = None
@@ -384,8 +485,10 @@ class SystemPower:
             else:
                 logging.info(f"[{uptime_minutes:7.2f}] {self.status()}")
 
+            # Check for critical battery with thread-safe check
             if self.running and self.has_critical_battery_power():
                 self.shutdown()
+            
             time.sleep(interval)
 
     def log_forever(self, interval=5):
