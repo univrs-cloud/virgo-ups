@@ -9,22 +9,29 @@
 # Note: Once power is terminated, the system loses power immediately,
 # so no cleanup or release is needed or possible.
 
-# cat /sys/kernel/debug/gpio
-
 if [ "$1" = "poweroff" ] || [ "$1" = "halt" ]; then
-    BUTTON=0
+    PIN=26
 
     if grep -aq "Pi 4" /proc/device-tree/model; then
-        # Raspberry Pi 4: GPIO base 512 + pin 26 = 538
-        BUTTON=538
+        # Raspberry Pi 4: GPIO base is always 512
+        BUTTON=$((512 + PIN))
+    elif grep -aq "Pi 5" /proc/device-tree/model; then
+        # Raspberry Pi 5: try gpioset (libgpiod v2) first — most reliable
+        # as it addresses by chip/line and avoids sysfs base offset issues
+        if command -v gpioset >/dev/null 2>&1; then
+            gpioset --hold-period 10s -c gpiochip0 ${PIN}=1
+            exit 0
+        fi
+
+        # Fallback: read RP1 GPIO base dynamically (varies across units/kernels)
+        BASE=$(cat /sys/bus/platform/devices/1f000d0000.gpio/gpio/gpiochip*/base 2>/dev/null)
+        if [ -n "$BASE" ]; then
+            BUTTON=$((BASE + PIN))
+        fi
     fi
 
-    if grep -aq "Pi 5" /proc/device-tree/model; then
-        # Raspberry Pi 5: GPIO base 571 + pin 26 = 597
-        BUTTON=597
-    fi
-
-    if [ "$BUTTON" -eq 0 ]; then
+    # Fallback to sysfs interface (Pi 4, or Pi 5 without gpioset)
+    if [ -z "$BUTTON" ] || [ "$BUTTON" -eq 0 ]; then
         exit 0
     fi
 
@@ -32,15 +39,13 @@ if [ "$1" = "poweroff" ] || [ "$1" = "halt" ]; then
     echo "$BUTTON" > /sys/class/gpio/export 2>/dev/null
 
     # Configure as output
-    if echo "out" > /sys/class/gpio/gpio$BUTTON/direction 2>/dev/null; then
+    if echo "out" > /sys/class/gpio/gpio${BUTTON}/direction 2>/dev/null; then
         # PRESS: Set GPIO HIGH to simulate button press and hold
-        # The x728 UPS control signal is active-high (HIGH = button pressed)
-        echo "1" > /sys/class/gpio/gpio$BUTTON/value
+        echo "1" > /sys/class/gpio/gpio${BUTTON}/value
 
         # HOLD: Keep HIGH for 10 seconds to trigger power termination
         # Note: Once UPS power is terminated, this system will lose power
         # immediately, so no cleanup is needed or possible
         /usr/bin/sleep 10
     fi
-    # No cleanup needed - power will be cut by UPS before script completes
 fi
