@@ -1,3 +1,7 @@
+virgo-ups (2.0.6) stable; urgency=medium
+  * fix: resolve delayed power source detection when plugging back in
+ -- Robert <robert.gurde@gmail.com>  Mon, 16 Mar 2026 08:22:19 +0000
+
 virgo-ups (2.0.5) stable; urgency=medium
   * Refactor ups.shutdown for Raspberry Pi GPIO handling
  -- Robert <robert.gurde@gmail.com>  Sun, 15 Mar 2026 09:31:37 +0000
