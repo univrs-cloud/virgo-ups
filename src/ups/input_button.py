@@ -156,6 +156,11 @@ class BlinkingButton(ConsistentButton):
     which may indicate power source transitioning between states (e.g., charging).
     Suppresses individual press/release events during blinking and emits a single
     BLINK event instead.
+    
+    Key design principle: the actual hardware GPIO state is always authoritative.
+    If the hardware says "pressed" and our internal state disagrees, we trust
+    the hardware. Suppression only delays delivery — it never drops an event
+    whose final state matches the hardware.
     """
 
     def __init__(self, button: "gpiozero.Button"):
@@ -180,6 +185,16 @@ class BlinkingButton(ConsistentButton):
     def _cycle(self, current_state):
         """Process button state with blinking detection.
         
+        The logic has four paths for state changes:
+        1. Blinking detected (rapid toggling) -> suppress and emit BLINK
+        2. Enough time since last event -> treat as real transition
+        3. Too soon but hardware confirms the state -> treat as real transition
+        4. Too soon and hardware doesn't confirm -> suppress temporarily
+        
+        Suppressed events are released by the polling loop (every 0.5s) once
+        enough time has passed, or immediately if the hardware state confirms
+        the suppressed event.
+        
         Args:
             current_state: Current button state (True=pressed, False=released)
         """
@@ -188,23 +203,34 @@ class BlinkingButton(ConsistentButton):
             current_state = states[current_state]
 
         now = datetime.utcnow()
-        delta = 3600.0  # Default to 1 hour if no events
-        if len(self._events) >= 2:
-            delta = (now - self._events[-2].timestamp).total_seconds()
+
+        # Time since the last event — used for suppression decisions
+        delta_from_last = 3600.0
+        if len(self._events) >= 1:
+            delta_from_last = (now - self._events[-1].timestamp).total_seconds()
+
+        # Read the actual hardware state right now for confirmation
+        hardware_pressed = self.button.is_pressed
+        hardware_state = BUTTON_PRESS if hardware_pressed else BUTTON_RELEASE
 
         with self._state_lock:
             self._previous_state = self._state
             self._state = current_state
 
             if self._state == self._previous_state:
-                # State unchanged, check if we should release suppressed event
-                if self._suppressed_latest_event and delta > self.blink_duration * 1.5:
-                    self._is_pressed = current_state == BUTTON_PRESS
-                    self._latest_blink_time = None
-                    self._suppressed_latest_event = False
-                    self._do_callbacks(self._state)
+                # State unchanged — check if we should release a suppressed event
+                if self._suppressed_latest_event:
+                    hardware_disagrees = (hardware_state == BUTTON_PRESS) != self._is_pressed
+                    if delta_from_last > self.blink_duration or hardware_disagrees:
+                        self._is_pressed = current_state == BUTTON_PRESS
+                        self._latest_blink_time = None
+                        self._suppressed_latest_event = False
+                        self._do_callbacks(self._state)
+                return
 
-            elif self._check_blinking():
+            is_blinking = self._check_blinking()
+
+            if is_blinking:
                 # Blinking detected - suppress individual events, emit BLINK
                 self._suppressed_latest_event = True
                 if self._latest_blink_time is None:
@@ -213,15 +239,25 @@ class BlinkingButton(ConsistentButton):
                     self._suppressed_latest_event = True
                     self._do_callbacks(BUTTON_BLINK)
 
-            elif delta > self.blink_duration * 1.5:
-                # Sufficient time passed, treat as real state change
+            elif delta_from_last > self.blink_duration:
+                # Enough time since last event — this is a real state change
+                self._is_pressed = current_state == BUTTON_PRESS
+                self._latest_blink_time = None
+                self._suppressed_latest_event = False
+                self._do_callbacks(current_state)
+
+            elif hardware_state == current_state:
+                # Event arrived soon after previous one, but the hardware GPIO
+                # confirms this is the actual current state. Trust the hardware
+                # rather than suppressing a legitimate transition.
                 self._is_pressed = current_state == BUTTON_PRESS
                 self._latest_blink_time = None
                 self._suppressed_latest_event = False
                 self._do_callbacks(current_state)
 
             else:
-                # Too soon after previous event, suppress to avoid noise
+                # Too soon after previous event AND hardware doesn't confirm
+                # this state — likely noise/bounce, suppress it
                 self._suppressed_latest_event = True
 
     def _check_blinking(self):

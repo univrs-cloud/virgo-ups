@@ -60,6 +60,9 @@ class SystemPower:
         # Socket API reference for broadcasting changes
         self._socket_api = None
 
+        # Guard to prevent recursive broadcasts
+        self._broadcasting = False
+
         # Track previous values to detect changes
         self._previous_capacity = None
         self._previous_voltage = None
@@ -99,8 +102,12 @@ class SystemPower:
         self._previous_voltage = self.voltage
         self._previous_is_charging = self.is_charging
 
-    def _broadcast_if_changed(self, force=False):
-        """Broadcast status if values have changed.
+    def _broadcast_status(self, force=False):
+        """Broadcast status to connected clients if values changed.
+        
+        Prevents recursive broadcasts: if a broadcast is already in progress
+        (e.g., status_dict refresh triggers set_power_source which triggers
+        another broadcast), the nested call is skipped.
         
         Args:
             force: If True, broadcast even if no changes detected
@@ -108,14 +115,21 @@ class SystemPower:
         if self._socket_api is None:
             return
 
+        # Prevent recursive broadcasts
+        if self._broadcasting:
+            return
+
         capacity_changed = self._previous_capacity is None or self.capacity != self._previous_capacity
-        voltage_changed = self._previous_voltage is None or abs(self.voltage - self._previous_voltage) > 0.01  # 0.01V threshold
+        voltage_changed = self._previous_voltage is None or abs(self.voltage - self._previous_voltage) > 0.01
         charging_changed = self._previous_is_charging is None or self.is_charging != self._previous_is_charging
 
         if force or capacity_changed or voltage_changed or charging_changed:
-            self._socket_api.broadcast_status()
-            # Update previous values after broadcasting to track current state
-            self._update_previous_values()
+            self._broadcasting = True
+            try:
+                self._socket_api.broadcast_status()
+                self._update_previous_values()
+            finally:
+                self._broadcasting = False
 
     def _read_voltage(self):
         """Read battery voltage from I2C device.
@@ -170,15 +184,13 @@ class SystemPower:
                         self.is_charging = charging_state
                         self._last_charging_check_time = datetime.utcnow()
                 
-                # Broadcast if charging state changed
-                if old_charging != charging_state and self._socket_api:
+                # Broadcast if charging state changed (outside lock)
+                if old_charging != charging_state:
                     if charging_state:
                         logging.info(f"Charging detected (capacity increasing)")
                     else:
                         logging.info(f"Charging stopped (capacity stable/decreasing)")
-                    # Broadcast full status (voltage, capacity, power_source, is_charging)
-                    self._socket_api.broadcast_status()
-                    self._update_previous_values()
+                    self._broadcast_status(force=True)
         except Exception as e:
             logging.warning(f"Error in charging detection: {e}")
         finally:
@@ -236,9 +248,13 @@ class SystemPower:
         pass
 
     def _running_from_grid(self):
-        """Callback for when power source switches to grid."""
+        """Callback for when power source switches to grid.
+        
+        NOTE: This is called from the button's GPIO callback thread.
+        Must not block or do heavy I/O while holding locks, otherwise
+        subsequent GPIO edge events can be lost.
+        """
         with self._state_lock:
-            old_charging = self.is_charging
             self.is_charging = False
             # Cancel any pending shutdown when switching to grid power
             if self.has_issued_shutdown:
@@ -246,32 +262,32 @@ class SystemPower:
                 self.has_issued_shutdown = False
                 self.issued_shutdown_timestamp = None
             self.set_power_source(GRID_POWER, log_change=True)
-            # Broadcast if charging state changed
-            if old_charging != self.is_charging and self._socket_api:
-                self._socket_api.broadcast_status()
-                # Update previous values after broadcast since status_dict() refreshes them
-                self._update_previous_values()
+
+        # Broadcast OUTSIDE the state lock to avoid blocking GPIO callbacks
+        self._broadcast_status(force=True)
 
     def _running_from_battery(self):
-        """Callback for when power source switches to battery."""
+        """Callback for when power source switches to battery.
+        
+        NOTE: This is called from the button's GPIO callback thread.
+        Must not block or do heavy I/O while holding locks.
+        """
         with self._state_lock:
-            old_charging = self.is_charging
             self.is_charging = False
-            self._read_power_values()
             self.set_power_source(BATTERY_POWER, log_change=True)
-            # Broadcast charging state change
-            if old_charging != self.is_charging and self._socket_api:
-                self._socket_api.broadcast_status()
-                # Update previous values after broadcast since status_dict() refreshes them
-                self._update_previous_values()
-            
-            # Check for critical battery but don't shutdown immediately from callback
-            # Let the main monitoring loop handle it with proper checks
-            if self.running and self.has_critical_battery_power():
-                logging.warning(
-                    f"Critical battery level detected on switch to battery: {self.capacity}% "
-                    f"(threshold: {self.low_capacity_threshold}%)"
-                )
+
+        # Read I2C values and broadcast OUTSIDE the state lock
+        self._read_voltage()
+        self._read_capacity()
+        self._broadcast_status(force=True)
+
+        # Check for critical battery but don't shutdown immediately from callback
+        # Let the main monitoring loop handle it with proper checks
+        if self.running and self.has_critical_battery_power():
+            logging.warning(
+                f"Critical battery level detected on switch to battery: {self.capacity}% "
+                f"(threshold: {self.low_capacity_threshold}%)"
+            )
 
     def _read_power_values(self):
         """Read all power-related values from I2C and button."""
@@ -296,22 +312,19 @@ class SystemPower:
     def set_power_source(self, power_source, log_change=False):
         """Set the power source and update internal state.
         
+        NOTE: Does NOT broadcast — callers are responsible for broadcasting
+        after releasing any locks. This prevents recursive broadcast chains
+        and avoids holding locks during I/O.
+        
         Args:
             power_source: Power source constant (GRID_POWER or BATTERY_POWER)
             log_change: If True, log when power source changes
         """
-        old_power_source = self.power_source
         if log_change and self.power_source and self.power_source != power_source:
             logging.info(f"Power source switched from {self.power_source} to {power_source}")
 
         self.power_source = power_source
         self.is_running_from_battery = self.power_source == BATTERY_POWER
-        
-        # Broadcast if power source changed
-        if old_power_source and old_power_source != power_source and self._socket_api:
-            self._socket_api.broadcast_status()
-            # Update previous values after broadcast since status_dict() refreshes them
-            self._update_previous_values()
 
     def status(self):
         """Get human-readable status string.
@@ -326,13 +339,26 @@ class SystemPower:
         """Get status as dictionary.
         
         Args:
-            refresh: If True, refresh values from hardware before returning
+            refresh: If True, refresh voltage and capacity from hardware.
+                     Power source is NOT re-read here to avoid triggering
+                     set_power_source -> broadcast cycles during a broadcast.
             
         Returns:
             dict: Status information including capacity, voltage, and power source
         """
         if refresh:
-            self._read_power_values()
+            # Only refresh voltage and capacity — NOT power source.
+            # Power source is event-driven (button callbacks) and re-reading
+            # it here caused recursive broadcast chains:
+            #   broadcast -> status_dict -> _read_power_source -> set_power_source -> broadcast
+            try:
+                self._read_voltage()
+            except Exception as e:
+                logging.warning(f"Failed to read voltage: {repr(e)}")
+            try:
+                self._read_capacity()
+            except Exception as e:
+                logging.warning(f"Failed to read capacity: {repr(e)}")
         return {
             "capacity": self.capacity_float,
             "voltage": self.voltage,
@@ -473,7 +499,7 @@ class SystemPower:
             # Check charging status when on grid power (periodically)
             self._check_charging_status()
             # Broadcast if capacity or voltage changed
-            self._broadcast_if_changed()
+            self._broadcast_status()
             
             min_interval = 1 if self.is_running_from_battery else max(10, max_interval / 2.0)
             interval = scaled_value(
@@ -505,7 +531,7 @@ class SystemPower:
             # Check charging status when on grid power (periodically)
             self._check_charging_status()
             # Broadcast if capacity or voltage changed
-            self._broadcast_if_changed()
+            self._broadcast_status()
             logging.info(f"[{uptime.total_seconds():4.0f}] {self.status()}")
             time.sleep(interval)
 
