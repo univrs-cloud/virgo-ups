@@ -1,3 +1,7 @@
+virgo-ups (2.0.7) stable; urgency=medium
+  * Add boot confirmation signal for X728 power management
+ -- Robert <robert.gurde@gmail.com>  Sun, 29 Mar 2026 11:29:38 +0000
+
 virgo-ups (2.0.6) stable; urgency=medium
   * fix: resolve delayed power source detection when plugging back in
  -- Robert <robert.gurde@gmail.com>  Mon, 16 Mar 2026 08:22:19 +0000
