@@ -7,6 +7,8 @@ import smbus
 from datetime import datetime
 from threading import Thread, Lock
 
+from gpiozero import OutputDevice
+
 from .settings import is_development
 
 # Power source constants
@@ -25,9 +27,46 @@ REGISTER_CAPACITY = 4  # Capacity register
 VOLTAGE_SCALE_FACTOR = 1.25 / 1000 / 16  # Voltage calculation scaling
 CAPACITY_SCALE_FACTOR = 256  # Capacity calculation scaling (from 256 steps to percentage)
 
+# UPS V2.5+ software charge control (Geekworm): BCM GPIO 16 (header pin 36).
+# Drive HIGH to enable charging, LOW to disable (per Geekworm hardware notes).
+CHARGE_CONTROL_GPIO = 16
+CHARGE_ENABLE_BELOW_PCT = 85.0
+CHARGE_DISABLE_ABOVE_PCT = 90.0
+
+
+def software_charge_enabled_for_soc(
+    capacity_pct,
+    previous_enabled,
+    enable_below_pct,
+    disable_above_pct,
+):
+    """Decide whether software charge control should enable charging.
+
+    Args:
+        capacity_pct: Current state of charge (percent).
+        previous_enabled: Last decision when SoC was in the hysteresis band,
+            or None if there is no prior decision (defaults to enabling).
+        enable_below_pct: Enable charging when SoC is strictly below this.
+        disable_above_pct: Disable charging when SoC is strictly above this.
+
+    Returns:
+        bool: True to enable charging, False to disable.
+    """
+    if capacity_pct < enable_below_pct:
+        return True
+    if capacity_pct > disable_above_pct:
+        return False
+    if previous_enabled is None:
+        return True
+    return previous_enabled
+
 
 class SystemPower:
-    """Monitors system power status from UPS battery via I2C and button input."""
+    """Monitors system power status from UPS battery via I2C and button input.
+
+    On UPS V2.5+ hardware, toggles BCM GPIO 16 to enable/disable charging from
+    state of charge (enable below 90%, disable above 99%, with hysteresis between).
+    """
 
     def __init__(self, button):
         """Initialize power monitor with button input for power source detection.
@@ -80,8 +119,54 @@ class SystemPower:
         self._shutdown_confirmation_required = True  # Require power source confirmation before shutdown
         self._shutdown_grace_period = 5  # Seconds to wait and re-check before actual shutdown
 
+        # UPS software charge enable (GPIO 16); None if unavailable (e.g. dev host).
+        self._charge_pin = None
+        self._charge_control_desired = None
+        self._init_charge_control_gpio()
+
         self._read_power_values()
+        if not self.has_read_errors:
+            self._sync_charge_control_gpio()
         self.power_source_button.start()
+
+    def _init_charge_control_gpio(self):
+        """Set up UPS GPIO 16 charge control when running on real hardware."""
+        if is_development():
+            return
+        try:
+            # Default HIGH until first successful SoC-based sync (enable charging).
+            self._charge_pin = OutputDevice(CHARGE_CONTROL_GPIO, initial_value=True)
+            logging.info(
+                "UPS software charge control initialized (GPIO %s HIGH = charging enabled)",
+                CHARGE_CONTROL_GPIO,
+            )
+        except Exception as e:
+            logging.warning("UPS charge control GPIO unavailable: %s", repr(e))
+
+    def _sync_charge_control_gpio(self):
+        """Drive GPIO 16 from SoC using software_charge_enabled_for_soc."""
+        if self._charge_pin is None:
+            return
+        if self.has_read_errors:
+            return
+        c = self.capacity_float
+        if c is None:
+            return
+        want_charge = software_charge_enabled_for_soc(
+            c,
+            self._charge_control_desired,
+            CHARGE_ENABLE_BELOW_PCT,
+            CHARGE_DISABLE_ABOVE_PCT,
+        )
+        self._charge_control_desired = want_charge
+        if want_charge:
+            if not self._charge_pin.is_active:
+                self._charge_pin.on()
+                logging.info("UPS charging enabled via GPIO %s (SoC %.1f%%)", CHARGE_CONTROL_GPIO, c)
+        else:
+            if self._charge_pin.is_active:
+                self._charge_pin.off()
+                logging.info("UPS charging disabled via GPIO %s (SoC %.1f%%)", CHARGE_CONTROL_GPIO, c)
 
     def set_socket_api(self, socket_api):
         """Set the socket API instance for broadcasting status changes.
@@ -480,6 +565,12 @@ class SystemPower:
         self.running = False
         if isinstance(self.power_source_button, Thread):
             self.power_source_button.stop()
+        if self._charge_pin is not None:
+            try:
+                self._charge_pin.close()
+            except Exception as e:
+                logging.warning("Failed to close charge control GPIO: %s", repr(e))
+            self._charge_pin = None
 
     def monitor_forever(self, max_interval=60):
         """Monitor power status continuously with adaptive polling interval.
@@ -496,6 +587,8 @@ class SystemPower:
         while self.running:
             uptime = datetime.utcnow() - now
             self._read_power_values()
+            if not self.has_read_errors:
+                self._sync_charge_control_gpio()
             # Check charging status when on grid power (periodically)
             self._check_charging_status()
             # Broadcast if capacity or voltage changed
@@ -528,6 +621,8 @@ class SystemPower:
         while self.running:
             uptime = datetime.utcnow() - now
             self._read_power_values()
+            if not self.has_read_errors:
+                self._sync_charge_control_gpio()
             # Check charging status when on grid power (periodically)
             self._check_charging_status()
             # Broadcast if capacity or voltage changed

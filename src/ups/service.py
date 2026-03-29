@@ -24,9 +24,9 @@ from .settings import is_development
 # GPIO pin number for power source button (GPIO 6 on Raspberry Pi)
 POWER_SOURCE_BUTTON_PIN = 6
 
-# GPIO pin number for X728 boot confirmation signal
-# Must be held HIGH for entire service lifetime to signal X728 that Pi
-# has booted successfully. Without this, X728 may not provide stable
+# GPIO pin number for UPS boot confirmation signal
+# Must be held HIGH for entire service lifetime to signal UPS that Pi
+# has booted successfully. Without this, UPS may not provide stable
 # power output and may require double button press on next boot.
 BOOT_CONFIRM_PIN = 12
 
@@ -82,14 +82,14 @@ def main():
     """
     logging.info("Starting ups power management")
 
-    # Signal X728 that Pi has booted successfully.
+    # Signal UPS that Pi has booted successfully.
     # This pin must be held HIGH for the entire service lifetime.
-    # The X728 uses this signal to confirm successful boot and maintain
-    # stable power output. Without it, the X728 may require a double
+    # The UPS uses this signal to confirm successful boot and maintain
+    # stable power output. Without it, the UPS may require a double
     # button press on next boot or fail to start the Pi on first attempt.
     boot_pin = LED(BOOT_CONFIRM_PIN)
     boot_pin.on()
-    logging.info(f"X728 boot confirmation signal set (GPIO {BOOT_CONFIRM_PIN} HIGH)")
+    logging.info(f"UPS boot confirmation signal set (GPIO {BOOT_CONFIRM_PIN} HIGH)")
 
     ups = SystemPower(BlinkingButton(Button(POWER_SOURCE_BUTTON_PIN)))
     sock_handler = UnixSocketApi(ups)
@@ -109,7 +109,7 @@ def main():
         ups.stop()
         # Release boot confirmation pin on clean exit
         boot_pin.off()
-        logging.info(f"X728 boot confirmation signal released (GPIO {BOOT_CONFIRM_PIN} LOW)")
+        logging.info(f"UPS boot confirmation signal released (GPIO {BOOT_CONFIRM_PIN} LOW)")
 
 
 if __name__ == "__main__":

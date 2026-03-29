@@ -7,7 +7,7 @@
 #
 # The script simulates: PRESS -> HOLD (2s) -> RELEASE
 #
-# The GPIO must be restored LOW after the press signal, otherwise the X728
+# The GPIO must be restored LOW after the press signal, otherwise the UPS
 # will require the onboard button to be pressed twice on next power-on,
 # and the AUTO ON function will also be affected.
 #
@@ -42,7 +42,7 @@ if [ "$1" = "poweroff" ] || [ "$1" = "halt" ]; then
         echo "1" > /sys/class/gpio/gpio${BUTTON}/value
 
         # HOLD: Keep HIGH for 2 seconds
-        # X728 will cut power during this window
+        # UPS will cut power during this window
         /usr/bin/sleep 2
 
         # RESTORE: Drive GPIO LOW for clean next boot
@@ -50,10 +50,10 @@ if [ "$1" = "poweroff" ] || [ "$1" = "halt" ]; then
         # button twice to turn on the device, and the AUTO ON function will
         # also be affected.
         # Note: sysfs holds this LOW state in hardware even after this script
-        # exits, so the X728 sees a clean LOW state on next power-on.
+        # exits, so the UPS sees a clean LOW state on next power-on.
         echo "0" > /sys/class/gpio/gpio${BUTTON}/value
 
-        # WAIT: In case X728 takes longer to cut power
+        # WAIT: In case UPS takes longer to cut power
         /usr/bin/sleep 8
     fi
 fi

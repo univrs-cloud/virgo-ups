@@ -1,9 +1,13 @@
+virgo-ups (2.1.0) stable; urgency=medium
+  * Enhance power management with software charge control for UPS
+ -- Robert <robert.gurde@gmail.com>  Sun, 29 Mar 2026 16:24:00 +0000
+
 virgo-ups (2.0.8) stable; urgency=medium
-  * Refactor ups.shutdown script to improve GPIO handling for X728 UPS
+  * Refactor ups.shutdown script to improve GPIO handling for UPS
  -- Robert <robert.gurde@gmail.com>  Sun, 29 Mar 2026 13:04:05 +0000
 
 virgo-ups (2.0.7) stable; urgency=medium
-  * Add boot confirmation signal for X728 power management
+  * Add boot confirmation signal for UPS power management
  -- Robert <robert.gurde@gmail.com>  Sun, 29 Mar 2026 11:29:38 +0000
 
 virgo-ups (2.0.6) stable; urgency=medium
