@@ -10,7 +10,7 @@ import logging, platform, sys
 import smbus
 
 from datetime import datetime
-from gpiozero import Button
+from gpiozero import Button, LED
 from logging.config import dictConfig
 from logging.handlers import SysLogHandler
 from threading import Thread, Lock
@@ -23,6 +23,12 @@ from .settings import is_development
 
 # GPIO pin number for power source button (GPIO 6 on Raspberry Pi)
 POWER_SOURCE_BUTTON_PIN = 6
+
+# GPIO pin number for X728 boot confirmation signal
+# Must be held HIGH for entire service lifetime to signal X728 that Pi
+# has booted successfully. Without this, X728 may not provide stable
+# power output and may require double button press on next boot.
+BOOT_CONFIRM_PIN = 12
 
 # Logging interval for development mode (seconds)
 DEV_LOG_INTERVAL = 1.5
@@ -75,6 +81,16 @@ def main():
     Handles graceful shutdown on KeyboardInterrupt.
     """
     logging.info("Starting ups power management")
+
+    # Signal X728 that Pi has booted successfully.
+    # This pin must be held HIGH for the entire service lifetime.
+    # The X728 uses this signal to confirm successful boot and maintain
+    # stable power output. Without it, the X728 may require a double
+    # button press on next boot or fail to start the Pi on first attempt.
+    boot_pin = LED(BOOT_CONFIRM_PIN)
+    boot_pin.on()
+    logging.info(f"X728 boot confirmation signal set (GPIO {BOOT_CONFIRM_PIN} HIGH)")
+
     ups = SystemPower(BlinkingButton(Button(POWER_SOURCE_BUTTON_PIN)))
     sock_handler = UnixSocketApi(ups)
     # Link socket API to power monitor for broadcasting changes
@@ -91,6 +107,9 @@ def main():
         logging.info("Exiting")
         sock_handler.stop()
         ups.stop()
+        # Release boot confirmation pin on clean exit
+        boot_pin.off()
+        logging.info(f"X728 boot confirmation signal released (GPIO {BOOT_CONFIRM_PIN} LOW)")
 
 
 if __name__ == "__main__":
