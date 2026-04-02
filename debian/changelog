@@ -1,4 +1,8 @@
 virgo-ups (2.1.0) stable; urgency=medium
+  * Update charge control thresholds
+ -- Robert <robert.gurde@gmail.com>  Thu, 02 Apr 2026 07:42:17 +0000
+
+virgo-ups (2.1.0) stable; urgency=medium
   * Enhance power management with software charge control for UPS
  -- Robert <robert.gurde@gmail.com>  Sun, 29 Mar 2026 16:24:00 +0000
 

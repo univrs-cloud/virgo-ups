@@ -30,8 +30,8 @@ CAPACITY_SCALE_FACTOR = 256  # Capacity calculation scaling (from 256 steps to p
 # UPS V2.5+ software charge control (Geekworm): BCM GPIO 16 (header pin 36).
 # Drive HIGH to enable charging, LOW to disable (per Geekworm hardware notes).
 CHARGE_CONTROL_GPIO = 16
-CHARGE_ENABLE_BELOW_PCT = 85.0
-CHARGE_DISABLE_ABOVE_PCT = 90.0
+CHARGE_ENABLE_BELOW_PCT = 90.0
+CHARGE_DISABLE_ABOVE_PCT = 97.0
 
 
 def software_charge_enabled_for_soc(
