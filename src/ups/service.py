@@ -7,18 +7,14 @@ via Unix socket, and initiates shutdown when battery is critically low.
 """
 
 import logging, platform, sys
-import smbus
 
-from datetime import datetime
 from gpiozero import Button, LED
-from logging.config import dictConfig
 from logging.handlers import SysLogHandler
-from threading import Thread, Lock
 
 from .unix_socket_api import UnixSocketApi
 
 from .input_button import BlinkingButton
-from .power_monitor import SystemPower
+from .power_monitor import SystemPower, UpsNotDetectedError
 from .settings import is_development
 
 # GPIO pin number for power source button (GPIO 6 on Raspberry Pi)
@@ -91,7 +87,14 @@ def main():
     boot_pin.on()
     logging.info(f"UPS boot confirmation signal set (GPIO {BOOT_CONFIRM_PIN} HIGH)")
 
-    ups = SystemPower(BlinkingButton(Button(POWER_SOURCE_BUTTON_PIN)))
+    try:
+        ups = SystemPower(BlinkingButton(Button(POWER_SOURCE_BUTTON_PIN)))
+    except UpsNotDetectedError as e:
+        logging.error(f"No UPS detected, stopping service: {e}")
+        # Release boot confirmation pin so we leave the GPIO in a clean state.
+        boot_pin.off()
+        return
+
     sock_handler = UnixSocketApi(ups)
     # Link socket API to power monitor for broadcasting changes
     ups.set_socket_api(sock_handler)

@@ -119,10 +119,14 @@ class UnixSocketApi:
             # Disconnection will be detected when we try to send broadcasts
             while self._running:
                 try:
-                    # Check if client is still connected by trying to peek
-                    # This will raise an exception if client disconnected
-                    conn.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
-                    # If we get here, client is still connected
+                    # Check if client is still connected by trying to peek.
+                    # A 0-byte return means the peer closed the connection
+                    # cleanly (EOF); an exception means it dropped.
+                    peeked = conn.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+                    if peeked == b"":
+                        # Peer performed an orderly shutdown
+                        break
+                    # Client still connected (and sent data we ignore)
                     time.sleep(5)  # Check every 5 seconds
                 except BlockingIOError:
                     # No data available, connection still alive

@@ -1,5 +1,5 @@
-import logging, os, time, platform, struct, subprocess, sys, typing
-from datetime import datetime
+import time, typing
+from datetime import datetime, timezone
 from threading import Thread, Lock
 
 # Button event types
@@ -66,6 +66,7 @@ class ConsistentButton(Thread):
         self.when_pressed = None
         self.when_released = None
         self.when_held = None
+        self.when_blinking = None
         self.running = False
         self._state_lock = Lock()
         self._state = None
@@ -130,7 +131,7 @@ class ConsistentButton(Thread):
         Args:
             event: Event type (BUTTON_PRESS, BUTTON_RELEASE, etc.)
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         self._events = [*self._events[1 - self._max_events :], ButtonEvent(event=event, timestamp=now)]
 
     def _do_callbacks(self, state):
@@ -202,7 +203,7 @@ class BlinkingButton(ConsistentButton):
         if isinstance(current_state, bool):
             current_state = states[current_state]
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         # Time since the last event — used for suppression decisions
         delta_from_last = 3600.0

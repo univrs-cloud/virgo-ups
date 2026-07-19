@@ -1,11 +1,13 @@
 [Unit]
 Description=UPS monitor
+After=multi-user.target
 
 [Service]
 Type=simple
-RemainAfterExit=yes
 WorkingDirectory=/usr/share/virgo
 ExecStart=/usr/sbin/ups.sh
+Restart=on-failure
+RestartSec=5
 
 [Install]
-WantedBy = multi-user.target
+WantedBy=multi-user.target

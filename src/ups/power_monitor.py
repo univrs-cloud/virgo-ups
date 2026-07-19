@@ -4,7 +4,7 @@ import subprocess
 import time
 import smbus
 
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Thread, Lock
 
 from gpiozero import OutputDevice
@@ -32,6 +32,19 @@ CAPACITY_SCALE_FACTOR = 256  # Capacity calculation scaling (from 256 steps to p
 CHARGE_CONTROL_GPIO = 16
 CHARGE_ENABLE_BELOW_PCT = 90.0
 CHARGE_DISABLE_ABOVE_PCT = 97.0
+
+# Startup probe: how hard to try reaching the battery gauge before concluding
+# there is no UPS. Retries tolerate a slow I2C bus coming up at boot.
+UPS_PROBE_ATTEMPTS = 3
+UPS_PROBE_DELAY = 2.0  # seconds between probe attempts
+
+
+class UpsNotDetectedError(Exception):
+    """Raised when the UPS battery gauge cannot be reached over I2C.
+
+    Signals that there is no UPS to monitor, so the service should log the
+    reason and stop rather than run with no working I2C communication.
+    """
 
 
 def software_charge_enabled_for_soc(
@@ -65,7 +78,8 @@ class SystemPower:
     """Monitors system power status from UPS battery via I2C and button input.
 
     On UPS V2.5+ hardware, toggles BCM GPIO 16 to enable/disable charging from
-    state of charge (enable below 90%, disable above 99%, with hysteresis between).
+    state of charge (enable below CHARGE_ENABLE_BELOW_PCT, disable above
+    CHARGE_DISABLE_ABOVE_PCT, with hysteresis between).
     """
 
     def __init__(self, button):
@@ -74,7 +88,13 @@ class SystemPower:
         Args:
             button: Button instance that detects power source state (pressed = grid, released = battery)
         """
-        self.bus = smbus.SMBus(I2C_BUS_PORT)
+        try:
+            self.bus = smbus.SMBus(I2C_BUS_PORT)
+        except (OSError, IOError) as e:
+            raise UpsNotDetectedError(
+                f"I2C bus {I2C_BUS_PORT} (/dev/i2c-{I2C_BUS_PORT}) is unavailable ({repr(e)}); "
+                f"is I2C enabled and a UPS connected?"
+            ) from e
 
         self.voltage = None
         self.capacity = None
@@ -94,7 +114,7 @@ class SystemPower:
         self.power_source_button = button
         self.power_source_button.when_pressed = self._running_from_grid
         self.power_source_button.when_released = self._running_from_battery
-        self.power_source_button.when_held = self._beeing_held
+        self.power_source_button.when_held = self._being_held
 
         # Socket API reference for broadcasting changes
         self._socket_api = None
@@ -106,6 +126,7 @@ class SystemPower:
         self._previous_capacity = None
         self._previous_voltage = None
         self._previous_is_charging = None
+        self._previous_has_read_errors = False
 
         # Charging detection parameters
         self._charging_detection_samples = 3
@@ -119,6 +140,10 @@ class SystemPower:
         self._shutdown_confirmation_required = True  # Require power source confirmation before shutdown
         self._shutdown_grace_period = 5  # Seconds to wait and re-check before actual shutdown
 
+        # Confirm the battery gauge actually responds before setting anything
+        # else up. Raises UpsNotDetectedError if there is no UPS to monitor.
+        self._probe_battery_gauge()
+
         # UPS software charge enable (GPIO 16); None if unavailable (e.g. dev host).
         self._charge_pin = None
         self._charge_control_desired = None
@@ -128,6 +153,45 @@ class SystemPower:
         if not self.has_read_errors:
             self._sync_charge_control_gpio()
         self.power_source_button.start()
+
+    def _probe_battery_gauge(self):
+        """Verify the UPS battery gauge is reachable over I2C.
+
+        Retries a few times to tolerate a slow I2C bus at boot. If the gauge
+        never responds, closes the bus and raises UpsNotDetectedError so the
+        service can log the reason and stop instead of running blind.
+
+        Raises:
+            UpsNotDetectedError: If no reading succeeds after all attempts.
+        """
+        last_error = None
+        for attempt in range(1, UPS_PROBE_ATTEMPTS + 1):
+            try:
+                self._read_voltage()
+                self._read_capacity()
+                logging.info(
+                    "UPS detected at I2C address %s on bus %s (%.0f%%, %.2fV)",
+                    hex(I2C_BATTERY_ADDRESS), I2C_BUS_PORT, self.capacity_float, self.voltage,
+                )
+                return
+            except (OSError, IOError) as e:
+                last_error = e
+                logging.warning(
+                    "No response from UPS battery gauge (attempt %s/%s): %s",
+                    attempt, UPS_PROBE_ATTEMPTS, repr(e),
+                )
+                if attempt < UPS_PROBE_ATTEMPTS:
+                    time.sleep(UPS_PROBE_DELAY)
+
+        try:
+            self.bus.close()
+        except Exception:
+            pass
+        raise UpsNotDetectedError(
+            f"No response from UPS battery gauge at I2C address {hex(I2C_BATTERY_ADDRESS)} "
+            f"on bus {I2C_BUS_PORT} after {UPS_PROBE_ATTEMPTS} attempts ({repr(last_error)}); "
+            f"no UPS detected."
+        ) from last_error
 
     def _init_charge_control_gpio(self):
         """Set up UPS GPIO 16 charge control when running on real hardware."""
@@ -186,6 +250,7 @@ class SystemPower:
         self._previous_capacity = self.capacity
         self._previous_voltage = self.voltage
         self._previous_is_charging = self.is_charging
+        self._previous_has_read_errors = self.has_read_errors
 
     def _broadcast_status(self, force=False):
         """Broadcast status to connected clients if values changed.
@@ -205,10 +270,14 @@ class SystemPower:
             return
 
         capacity_changed = self._previous_capacity is None or self.capacity != self._previous_capacity
-        voltage_changed = self._previous_voltage is None or abs(self.voltage - self._previous_voltage) > 0.01
+        if self.voltage is None or self._previous_voltage is None:
+            voltage_changed = self.voltage is not self._previous_voltage
+        else:
+            voltage_changed = abs(self.voltage - self._previous_voltage) > 0.01
         charging_changed = self._previous_is_charging is None or self.is_charging != self._previous_is_charging
+        error_changed = self.has_read_errors != self._previous_has_read_errors
 
-        if force or capacity_changed or voltage_changed or charging_changed:
+        if force or capacity_changed or voltage_changed or charging_changed or error_changed:
             self._broadcasting = True
             try:
                 self._socket_api.broadcast_status()
@@ -267,7 +336,7 @@ class SystemPower:
                     old_charging = self.is_charging
                     if old_charging != charging_state:
                         self.is_charging = charging_state
-                        self._last_charging_check_time = datetime.utcnow()
+                        self._last_charging_check_time = datetime.now(timezone.utc)
                 
                 # Broadcast if charging state changed (outside lock)
                 if old_charging != charging_state:
@@ -292,7 +361,7 @@ class SystemPower:
                 self._charging_detection_in_progress = False
             return
         
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         should_check = (
             not self._charging_detection_in_progress and
             (self._last_charging_check_time is None or
@@ -328,7 +397,7 @@ class SystemPower:
                 self._last_charging_check_time = None
         self.set_power_source(power_source, log_change=True)
 
-    def _beeing_held(self):
+    def _being_held(self):
         """Callback for when button is held (currently unused)."""
         pass
 
@@ -394,6 +463,23 @@ class SystemPower:
                 logging.warning(f"Failed to read {label}: {repr(e)}")
         self.has_read_errors = has_errors
 
+    def _log_read_error_transition(self):
+        """Log once whenever I2C communication is lost or restored.
+
+        Does not update the previous-state tracker — _broadcast_status detects
+        the same transition and updates it after broadcasting, so the error
+        state is reported exactly once to both the log and connected clients.
+        """
+        if self.has_read_errors == self._previous_has_read_errors:
+            return
+        if self.has_read_errors:
+            logging.error(
+                "Lost communication with UPS battery gauge; the monitor will keep "
+                "retrying. Reported values may be stale until it recovers."
+            )
+        else:
+            logging.info("Communication with UPS battery gauge restored.")
+
     def set_power_source(self, power_source, log_change=False):
         """Set the power source and update internal state.
         
@@ -418,7 +504,9 @@ class SystemPower:
             str: Formatted status message
         """
         charging_status = " (charging)" if self.is_charging else " (not charging)"
-        return f"Battery: {self.capacity:2}% ({self.voltage:4.2f}V), power: {self.power_source}{charging_status}"
+        capacity_str = f"{self.capacity:2}%" if self.capacity is not None else "  ?%"
+        voltage_str = f"{self.voltage:4.2f}V" if self.voltage is not None else "?V"
+        return f"Battery: {capacity_str} ({voltage_str}), power: {self.power_source}{charging_status}"
 
     def status_dict(self, refresh: bool = True) -> dict:
         """Get status as dictionary.
@@ -450,15 +538,22 @@ class SystemPower:
             "power_source": self.power_source,
             "is_charging": self.is_charging,
             "low_capacity_threshold": self.low_capacity_threshold,
+            # True when the last I2C read cycle failed; capacity/voltage may be
+            # stale while the monitor keeps retrying.
+            "i2c_error": self.has_read_errors,
         }
 
     def has_critical_battery_power(self):
         """Check if battery power is critically low.
         
         Returns:
-            bool: True if running on battery and capacity is at or below threshold
+            bool: True if running on battery and capacity is at or below threshold.
+                  Returns False if capacity is unknown (read error) to avoid
+                  triggering a shutdown on missing data.
         """
         with self._state_lock:
+            if self.capacity is None:
+                return False
             return self.is_running_from_battery and (self.capacity <= self.low_capacity_threshold)
 
     def _confirm_shutdown_conditions(self):
@@ -549,7 +644,7 @@ class SystemPower:
                     subprocess.check_call(["shutdown", "-h", "now"], shell=False)
                 
                 self.has_issued_shutdown = True
-                self.issued_shutdown_timestamp = datetime.utcnow()
+                self.issued_shutdown_timestamp = datetime.now(timezone.utc)
                 
         except KeyboardInterrupt:
             self.has_issued_shutdown = False
@@ -582,22 +677,28 @@ class SystemPower:
         Args:
             max_interval: Maximum polling interval in seconds (default: 60)
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         self.running = True
         while self.running:
-            uptime = datetime.utcnow() - now
+            uptime = datetime.now(timezone.utc) - now
             self._read_power_values()
+            # Log I2C comms lost/restored transitions (before broadcast).
+            self._log_read_error_transition()
             if not self.has_read_errors:
                 self._sync_charge_control_gpio()
             # Check charging status when on grid power (periodically)
             self._check_charging_status()
-            # Broadcast if capacity or voltage changed
+            # Broadcast if capacity, voltage, or error state changed
             self._broadcast_status()
-            
+
             min_interval = 1 if self.is_running_from_battery else max(10, max_interval / 2.0)
-            interval = scaled_value(
-                self.capacity, self.low_capacity_threshold, self.low_capacity_threshold + 15, min_interval, max_interval
-            )
+            if self.has_read_errors or self.capacity is None:
+                # Comms error or unknown capacity — poll frequently to recover.
+                interval = min_interval
+            else:
+                interval = scaled_value(
+                    self.capacity, self.low_capacity_threshold, self.low_capacity_threshold + 15, min_interval, max_interval
+                )
             uptime_minutes = uptime.total_seconds() / 60.0
             if interval > 45:
                 logging.info(f"[{uptime_minutes:5.0f}] {self.status()}")
@@ -616,16 +717,18 @@ class SystemPower:
         Args:
             interval: Polling interval in seconds (default: 5)
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         self.running = True
         while self.running:
-            uptime = datetime.utcnow() - now
+            uptime = datetime.now(timezone.utc) - now
             self._read_power_values()
+            # Log I2C comms lost/restored transitions (before broadcast).
+            self._log_read_error_transition()
             if not self.has_read_errors:
                 self._sync_charge_control_gpio()
             # Check charging status when on grid power (periodically)
             self._check_charging_status()
-            # Broadcast if capacity or voltage changed
+            # Broadcast if capacity, voltage, or error state changed
             self._broadcast_status()
             logging.info(f"[{uptime.total_seconds():4.0f}] {self.status()}")
             time.sleep(interval)
