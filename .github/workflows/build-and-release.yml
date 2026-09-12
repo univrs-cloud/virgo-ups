@@ -27,7 +27,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
 
-      - run: sudo apt update && sudo apt install -y debhelper
+      - run: sudo apt update && sudo apt install -y debhelper build-essential
 
       - name: Stamp the tag version into the changelog
         env:
