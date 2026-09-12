@@ -1,0 +1,64 @@
+name: Build and release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04-arm
+            architecture: arm64
+          - runner: ubuntu-24.04
+            architecture: amd64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+
+      - run: sudo apt update && sudo apt install -y debhelper
+
+      - name: Stamp the tag version into the changelog
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        run: |
+          version=${TAG#v}
+          sed -i "1s/^virgo-ups ([^)]*)/virgo-ups ($version)/" debian/changelog
+          head -1 debian/changelog
+
+      - run: ./build.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deb-package-${{ matrix.architecture }}
+          path: dist/*.deb
+
+  release:
+    needs: build
+
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: deb-package-*
+          merge-multiple: true
+          path: deb
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: deb/*.deb
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
