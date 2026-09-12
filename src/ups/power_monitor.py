@@ -54,18 +54,18 @@ NO_UPS_ERROR = "No UPS found"
 class NoUpsMonitor:
     """Stand-in monitor for hosts with no UPS hardware.
 
-    Reports NO_UPS_ERROR as the socket message. It is deliberately not JSON, so
-    a client reading the socket fails to parse it and falls back to its own
-    no-UPS handling, while the service stays up and keeps the socket available.
+    Reports no battery charge, which clients already read as "this host has no
+    UPS", so the service stays up and keeps the socket available without
+    sending anything a client has to treat as a failure.
     """
 
     def status_message(self) -> str:
         """Report that there is no UPS on this host.
 
         Returns:
-            str: NO_UPS_ERROR
+            str: JSON-encoded no-UPS status
         """
-        return NO_UPS_ERROR
+        return json.dumps({"battery_charge": False, "error": NO_UPS_ERROR})
 
     def set_socket_api(self, socket_api):
         """Accept and ignore the socket API; there are no changes to broadcast.
