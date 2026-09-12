@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import socket
@@ -71,8 +70,7 @@ class UnixSocketApi:
     def broadcast_status(self):
         """Broadcast current status to all connected clients."""
         try:
-            status = self._monitor.status_dict()
-            message = f"{json.dumps(status)}\n".encode()
+            message = f"{self._monitor.status_message()}\n".encode()
             
             with self._clients_lock:
                 disconnected = []
@@ -107,8 +105,7 @@ class UnixSocketApi:
             conn.setblocking(False)
             
             # Send initial status immediately
-            status = self._monitor.status_dict()
-            initial_message = f"{json.dumps(status)}\n".encode()
+            initial_message = f"{self._monitor.status_message()}\n".encode()
             conn.sendall(initial_message)
             
             # Add client to list

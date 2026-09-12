@@ -1,3 +1,4 @@
+import json
 import logging
 import struct
 import subprocess
@@ -53,21 +54,18 @@ NO_UPS_ERROR = "No UPS found"
 class NoUpsMonitor:
     """Stand-in monitor for hosts with no UPS hardware.
 
-    Reports an error instead of a status, so the service can keep serving the
-    socket on a host that has no battery gauge or no GPIO and clients get a
-    definite answer rather than a missing socket.
+    Reports NO_UPS_ERROR as the socket message. It is deliberately not JSON, so
+    a client reading the socket fails to parse it and falls back to its own
+    no-UPS handling, while the service stays up and keeps the socket available.
     """
 
-    def status_dict(self, refresh: bool = True) -> dict:
+    def status_message(self) -> str:
         """Report that there is no UPS on this host.
 
-        Args:
-            refresh: Accepted and ignored; there is nothing to read.
-
         Returns:
-            dict: Error information in place of a status
+            str: NO_UPS_ERROR
         """
-        return {"error": NO_UPS_ERROR}
+        return NO_UPS_ERROR
 
     def set_socket_api(self, socket_api):
         """Accept and ignore the socket API; there are no changes to broadcast.
@@ -575,6 +573,14 @@ class SystemPower:
             # stale while the monitor keeps retrying.
             "i2c_error": self.has_read_errors,
         }
+
+    def status_message(self) -> str:
+        """Get the status as the line to send over the socket.
+
+        Returns:
+            str: JSON-encoded status
+        """
+        return json.dumps(self.status_dict())
 
     def has_critical_battery_power(self):
         """Check if battery power is critically low.

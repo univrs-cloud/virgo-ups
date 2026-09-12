@@ -9,14 +9,14 @@ via Unix socket, and initiates shutdown when battery is critically low.
 import logging, platform, sys
 
 from gpiozero import Button, LED
-from gpiozero.exc import GPIOZeroError
+from gpiozero.exc import BadPinFactory, GPIOZeroError
 from logging.handlers import SysLogHandler
 from threading import Event
 
 from .unix_socket_api import UnixSocketApi
 
 from .input_button import BlinkingButton
-from .power_monitor import NoUpsMonitor, SystemPower, UpsNotDetectedError
+from .power_monitor import NO_UPS_ERROR, NoUpsMonitor, SystemPower, UpsNotDetectedError
 from .settings import is_development
 
 # GPIO pin number for power source button (GPIO 6 on Raspberry Pi)
@@ -63,13 +63,17 @@ def make_syslog_handler():
 
 
 def logging_setup():
-    """Configure logging handlers based on environment."""
+    """Configure logging handlers and level based on environment.
+
+    Debug messages are only emitted in development; production logs from info
+    upwards, so expected conditions stay out of the journal.
+    """
     logger = logging.getLogger()
     if not is_development():
         logger.addHandler(make_syslog_handler())
     else:
         logger.addHandler(make_stdout_handler())
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG if is_development() else logging.INFO)
 
 
 def boot_confirmation_signal():
@@ -85,10 +89,15 @@ def boot_confirmation_signal():
     """
     try:
         boot_pin = LED(BOOT_CONFIRM_PIN)
+    except BadPinFactory:
+        logging.debug(
+            f"No GPIO on this host, skipping UPS boot confirmation signal "
+            f"(GPIO {BOOT_CONFIRM_PIN})"
+        )
+        return None
     except (GPIOZeroError, OSError) as e:
         logging.warning(
-            f"No GPIO on this host, skipping UPS boot confirmation signal "
-            f"(GPIO {BOOT_CONFIRM_PIN}): {repr(e)}"
+            f"UPS boot confirmation signal unavailable (GPIO {BOOT_CONFIRM_PIN}): {repr(e)}"
         )
         return None
     boot_pin.on()
@@ -105,10 +114,13 @@ def power_monitor():
     """
     try:
         return SystemPower(BlinkingButton(Button(POWER_SOURCE_BUTTON_PIN)))
+    except BadPinFactory:
+        logging.debug("No GPIO on this host, no UPS to monitor")
+        return None
     except UpsNotDetectedError as e:
         logging.error(f"No UPS detected: {e}")
     except (GPIOZeroError, OSError) as e:
-        logging.error(f"No GPIO on this host, cannot monitor a UPS: {repr(e)}")
+        logging.error(f"Cannot monitor a UPS on this host: {repr(e)}")
     return None
 
 
@@ -119,7 +131,7 @@ def serve_without_ups():
     hardware answers on the socket instead of leaving clients to infer it from
     a service that keeps exiting.
     """
-    logging.info("Serving UPS status as unavailable; nothing to monitor on this host")
+    logging.info(f"{NO_UPS_ERROR}, reporting it on the socket")
     monitor = NoUpsMonitor()
     sock_handler = UnixSocketApi(monitor)
     try:
