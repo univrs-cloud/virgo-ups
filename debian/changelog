@@ -1,3 +1,7 @@
+virgo-ups (2.1.3) stable; urgency=medium
+  * Release 2.1.3
+ -- Robert <robert.gurde@gmail.com>  Sat, 12 Sep 2026 12:12:26 +0000
+
 virgo-ups (2.1.2) stable; urgency=medium
   * Stop cleanly with a clear log message when no UPS is detected on I2C at startup
   * Keep retrying and expose an i2c_error state if I2C comms fail while running
