@@ -9,12 +9,14 @@ via Unix socket, and initiates shutdown when battery is critically low.
 import logging, platform, sys
 
 from gpiozero import Button, LED
+from gpiozero.exc import GPIOZeroError
 from logging.handlers import SysLogHandler
+from threading import Event
 
 from .unix_socket_api import UnixSocketApi
 
 from .input_button import BlinkingButton
-from .power_monitor import SystemPower, UpsNotDetectedError
+from .power_monitor import NoUpsMonitor, SystemPower, UpsNotDetectedError
 from .settings import is_development
 
 # GPIO pin number for power source button (GPIO 6 on Raspberry Pi)
@@ -70,6 +72,66 @@ def logging_setup():
     logger.setLevel(logging.DEBUG)
 
 
+def boot_confirmation_signal():
+    """Signal the UPS that the Pi has booted successfully.
+
+    The pin must be held HIGH for the entire service lifetime. The UPS uses
+    this signal to confirm a successful boot and maintain stable power output.
+    Without it, the UPS may require a double button press on next boot or fail
+    to start the Pi on first attempt.
+
+    Returns:
+        gpiozero.LED or None: The held pin, or None on a host without GPIO.
+    """
+    try:
+        boot_pin = LED(BOOT_CONFIRM_PIN)
+    except (GPIOZeroError, OSError) as e:
+        logging.warning(
+            f"No GPIO on this host, skipping UPS boot confirmation signal "
+            f"(GPIO {BOOT_CONFIRM_PIN}): {repr(e)}"
+        )
+        return None
+    boot_pin.on()
+    logging.info(f"UPS boot confirmation signal set (GPIO {BOOT_CONFIRM_PIN} HIGH)")
+    return boot_pin
+
+
+def power_monitor():
+    """Build the power monitor for this host.
+
+    Returns:
+        SystemPower or None: The monitor, or None when this host has no UPS to
+        monitor because the battery gauge or the GPIO is missing.
+    """
+    try:
+        return SystemPower(BlinkingButton(Button(POWER_SOURCE_BUTTON_PIN)))
+    except UpsNotDetectedError as e:
+        logging.error(f"No UPS detected: {e}")
+    except (GPIOZeroError, OSError) as e:
+        logging.error(f"No GPIO on this host, cannot monitor a UPS: {repr(e)}")
+    return None
+
+
+def serve_without_ups():
+    """Serve the socket on a host that has no UPS.
+
+    Reports the no-UPS state to clients and stays up, so a node without UPS
+    hardware answers on the socket instead of leaving clients to infer it from
+    a service that keeps exiting.
+    """
+    logging.info("Serving UPS status as unavailable; nothing to monitor on this host")
+    monitor = NoUpsMonitor()
+    sock_handler = UnixSocketApi(monitor)
+    try:
+        sock_handler.start()
+        Event().wait()
+    except KeyboardInterrupt:
+        print("\n[Ctrl-C] received, exiting...")
+    finally:
+        logging.info("Exiting")
+        sock_handler.stop()
+
+
 def main():
     """Main service entry point.
     
@@ -78,21 +140,13 @@ def main():
     """
     logging.info("Starting ups power management")
 
-    # Signal UPS that Pi has booted successfully.
-    # This pin must be held HIGH for the entire service lifetime.
-    # The UPS uses this signal to confirm successful boot and maintain
-    # stable power output. Without it, the UPS may require a double
-    # button press on next boot or fail to start the Pi on first attempt.
-    boot_pin = LED(BOOT_CONFIRM_PIN)
-    boot_pin.on()
-    logging.info(f"UPS boot confirmation signal set (GPIO {BOOT_CONFIRM_PIN} HIGH)")
+    boot_pin = boot_confirmation_signal()
 
-    try:
-        ups = SystemPower(BlinkingButton(Button(POWER_SOURCE_BUTTON_PIN)))
-    except UpsNotDetectedError as e:
-        logging.error(f"No UPS detected, stopping service: {e}")
-        # Release boot confirmation pin so we leave the GPIO in a clean state.
-        boot_pin.off()
+    ups = power_monitor()
+    if ups is None:
+        if boot_pin is not None:
+            boot_pin.off()
+        serve_without_ups()
         return
 
     sock_handler = UnixSocketApi(ups)
@@ -110,9 +164,9 @@ def main():
         logging.info("Exiting")
         sock_handler.stop()
         ups.stop()
-        # Release boot confirmation pin on clean exit
-        boot_pin.off()
-        logging.info(f"UPS boot confirmation signal released (GPIO {BOOT_CONFIRM_PIN} LOW)")
+        if boot_pin is not None:
+            boot_pin.off()
+            logging.info(f"UPS boot confirmation signal released (GPIO {BOOT_CONFIRM_PIN} LOW)")
 
 
 if __name__ == "__main__":

@@ -9,3 +9,4 @@ debhelper-build-stamp
 *.debhelper
 debian/virgo-ups
 debian/files
+__pycache__

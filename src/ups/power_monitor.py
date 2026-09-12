@@ -47,6 +47,39 @@ class UpsNotDetectedError(Exception):
     """
 
 
+NO_UPS_ERROR = "No UPS found"
+
+
+class NoUpsMonitor:
+    """Stand-in monitor for hosts with no UPS hardware.
+
+    Reports an error instead of a status, so the service can keep serving the
+    socket on a host that has no battery gauge or no GPIO and clients get a
+    definite answer rather than a missing socket.
+    """
+
+    def status_dict(self, refresh: bool = True) -> dict:
+        """Report that there is no UPS on this host.
+
+        Args:
+            refresh: Accepted and ignored; there is nothing to read.
+
+        Returns:
+            dict: Error information in place of a status
+        """
+        return {"error": NO_UPS_ERROR}
+
+    def set_socket_api(self, socket_api):
+        """Accept and ignore the socket API; there are no changes to broadcast.
+
+        Args:
+            socket_api: UnixSocketApi instance
+        """
+
+    def stop(self):
+        """Nothing to stop."""
+
+
 def software_charge_enabled_for_soc(
     capacity_pct,
     previous_enabled,
