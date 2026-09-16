@@ -8,6 +8,6 @@ Section: utils
 Package: virgo-ups
 Priority: extra
 Architecture: any
-Depends: ${misc:Depends}, python3-smbus, python3-gpiozero
+Depends: ${misc:Depends}, python3-smbus, python3-gpiozero, nut-client, nut-server
 Description: UPS monitoring and automatic power-off services package
  Ensures that UPS monitoring and automatic power-off service is installed and running
