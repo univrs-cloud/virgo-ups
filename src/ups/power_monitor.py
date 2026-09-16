@@ -51,33 +51,6 @@ class UpsNotDetectedError(Exception):
 NO_UPS_ERROR = "No UPS found"
 
 
-class NoUpsMonitor:
-    """Stand-in monitor for hosts with no UPS hardware.
-
-    Reports no battery charge, which clients already read as "this host has no
-    UPS", so the service stays up and keeps the socket available without
-    sending anything a client has to treat as a failure.
-    """
-
-    def status_message(self) -> str:
-        """Report that there is no UPS on this host.
-
-        Returns:
-            str: JSON-encoded no-UPS status
-        """
-        return json.dumps({"battery_charge": False, "error": NO_UPS_ERROR})
-
-    def set_socket_api(self, socket_api):
-        """Accept and ignore the socket API; there are no changes to broadcast.
-
-        Args:
-            socket_api: UnixSocketApi instance
-        """
-
-    def stop(self):
-        """Nothing to stop."""
-
-
 def software_charge_enabled_for_soc(
     capacity_pct,
     previous_enabled,
@@ -571,7 +544,7 @@ class SystemPower:
             "low_capacity_threshold": self.low_capacity_threshold,
             # True when the last I2C read cycle failed; capacity/voltage may be
             # stale while the monitor keeps retrying.
-            "i2c_error": self.has_read_errors,
+            "read_error": self.has_read_errors,
         }
 
     def status_message(self) -> str:

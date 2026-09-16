@@ -11,12 +11,12 @@ import logging, platform, sys
 from gpiozero import Button, LED
 from gpiozero.exc import BadPinFactory, GPIOZeroError
 from logging.handlers import SysLogHandler
-from threading import Event
 
 from .unix_socket_api import UnixSocketApi
 
 from .input_button import BlinkingButton
-from .power_monitor import NO_UPS_ERROR, NoUpsMonitor, SystemPower, UpsNotDetectedError
+from .nut_monitor import NutMonitor
+from .power_monitor import NO_UPS_ERROR, SystemPower, UpsNotDetectedError
 from .settings import is_development
 
 # GPIO pin number for power source button (GPIO 6 on Raspberry Pi)
@@ -124,24 +124,26 @@ def power_monitor():
     return None
 
 
-def serve_without_ups():
-    """Serve the socket on a host that has no UPS.
+def serve_from_nut():
+    """Serve the socket on a host with no GPIO UPS, reading NUT instead.
 
-    Reports the no-UPS state to clients and stays up, so a node without UPS
-    hardware answers on the socket instead of leaving clients to infer it from
-    a service that keeps exiting.
+    Reports the no-UPS state until NUT answers for a device, so a node with no
+    UPS at all answers on the socket exactly as before, while a USB UPS that is
+    present or plugged in later is picked up and reported like the GPIO one.
     """
-    logging.info(f"{NO_UPS_ERROR}, reporting it on the socket")
-    monitor = NoUpsMonitor()
+    logging.info(f"{NO_UPS_ERROR} on GPIO, reading NUT instead")
+    monitor = NutMonitor()
     sock_handler = UnixSocketApi(monitor)
+    monitor.set_socket_api(sock_handler)
     try:
         sock_handler.start()
-        Event().wait()
+        monitor.monitor_forever()
     except KeyboardInterrupt:
         print("\n[Ctrl-C] received, exiting...")
     finally:
         logging.info("Exiting")
         sock_handler.stop()
+        monitor.stop()
 
 
 def main():
@@ -158,7 +160,7 @@ def main():
     if ups is None:
         if boot_pin is not None:
             boot_pin.off()
-        serve_without_ups()
+        serve_from_nut()
         return
 
     sock_handler = UnixSocketApi(ups)
