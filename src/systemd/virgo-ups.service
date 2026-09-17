@@ -1,5 +1,5 @@
 [Unit]
-Description=UPS monitor
+Description=virgoOS UPS monitor
 After=multi-user.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
